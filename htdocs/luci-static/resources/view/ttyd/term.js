@@ -8,12 +8,13 @@
 /*
  * luci-app-ttyd (strict fork) — terminal view.
  *
- * Upstream behaviour (uci 'ttyd', port/ssl/url_override handling) is
- * kept; the iframe is no longer static: the ttyd instance is started
- * ON DEMAND through the "ttyd-strict" rpcd plugin, runs with --once
- * (exactly one websocket client — this page), and exits when the page
- * closes. A busy session (live client elsewhere) is never killed
- * silently: a modal shows who is connected and the user decides.
+ * Fully automatic lifecycle, no manual controls:
+ *   - opening the page starts the on-demand ttyd (via the ttyd-strict
+ *     rpcd plugin, single client --once); a leftover session (stale tab)
+ *     is reaped/taken over automatically - the syslog audit trail on
+ *     the device records every takeover;
+ *   - leaving the page ends the session: the websocket dies with the
+ *     document and a pagehide beacon stops the instance as backstop.
  */
 
 var callSessionStatus = rpc.declare({
@@ -63,6 +64,11 @@ return view.extend({
 		this.fitTerminal();
 	},
 
+	placeholder: function(text) {
+		this.termHost.innerHTML = '';
+		this.termHost.appendChild(E('em', {}, [ text ]));
+	},
+
 	mountTerminal: function() {
 		this.termHost.innerHTML = '';
 		this.termHost.appendChild(E('iframe', {
@@ -97,117 +103,57 @@ return view.extend({
 			.format(s.pid || 0, since, clients);
 	},
 
-	/* --- session actions --------------------------------------------- */
+	/* --- automatic session management ------------------------------- */
 
-	handleStart: function(ev) {
+	/* ensure a session for THIS page: start it, or take over whatever
+	 * ttyd holds the port (a stale tab of ours in the common case; the
+	 * takeover is recorded in the device syslog) */
+	ensureSession: function() {
 		var self = this;
-
-		ev && ev.preventDefault();
-		this.userStopped = false;
 
 		return callSessionStart().then(function(res) {
-			self.handleStartReply(res);
-		}).catch(function() {
-			self.setStatus(_('RPC call failed - is the ttyd-strict rpcd plugin installed?'), 'error');
-		});
-	},
-
-	handleStartReply: function(res) {
-		if (res && res.result == 'started') {
-			ui.hideModal();
-			this.mountTerminal();
-			this.setStatus('', 'info');
-			return;
-		}
-		if (res && res.result) {
-			this.setStatus(_('Unable to start session: %s').format(res.result), 'error');
-			return;
-		}
-		if (res && (res.state == 'ours' || res.state == 'foreign-ttyd'))
-			this.showBusyModal(res);
-		else if (res && res.state == 'foreign-other')
-			this.showOccupiedUnknown(res);
-	},
-
-	handleTakeover: function(ev) {
-		var self = this;
-
-		ev && ev.preventDefault();
-
-		/* the old iframe points at the port we are about to kill -
-		 * replace it immediately instead of showing a refused page
-		 * while the takeover RPC restarts the instance */
-		this.termHost.innerHTML = '';
-		this.termHost.appendChild(E('em', {}, [ _('restarting session...') ]));
-		this.setStatus(_('Restarting session - the old client has been disconnected.'), 'info');
-
-		return callSessionTakeover().then(function(res) {
-			ui.hideModal();
 			if (res && res.result == 'started') {
 				self.mountTerminal();
-				self.setStatus(_('Previous session terminated - new session started.'), 'info');
+				self.setStatus('', 'info');
+			}
+			else if (res && !res.result &&
+			    (res.state == 'ours' || res.state == 'foreign-ttyd')) {
+				/* live client somewhere else: take over without asking -
+				 * being on this page IS the decision */
+				self.placeholder(_('restarting session...'));
+				self.setStatus(_('Previous session (%s) is being taken over - this has been logged.')
+					.format(self.describeStatus(res)), 'info');
+				return callSessionTakeover().then(function(r2) {
+					if (r2 && r2.result == 'started') {
+						self.mountTerminal();
+						self.setStatus('', 'info');
+					}
+					else if (r2 && r2.state == 'foreign-other') {
+						self.showOccupiedUnknown(r2);
+					}
+					else {
+						self.placeholder(_('no active session'));
+						self.setStatus(_('Unable to start session: %s')
+							.format((r2 && r2.result) || _('unknown')), 'error');
+					}
+				});
 			}
 			else if (res && res.state == 'foreign-other') {
 				self.showOccupiedUnknown(res);
 			}
 			else {
-				self.setStatus(_('Takeover failed: %s')
+				self.placeholder(_('no active session'));
+				self.setStatus(_('Unable to start session: %s')
 					.format((res && res.result) || _('unknown')), 'error');
 			}
 		}).catch(function() {
-			ui.hideModal();
 			self.setStatus(_('RPC call failed - is the ttyd-strict rpcd plugin installed?'), 'error');
 		});
-	},
-
-	handleStop: function(ev) {
-		var self = this;
-
-		ev && ev.preventDefault();
-		this.userStopped = true;
-
-		return callSessionStop().then(function() {
-			self.termHost.innerHTML = '';
-			self.termHost.appendChild(E('em', {}, [ _('no active session') ]));
-			self.sessionActive = false;
-			self.setStatus(_('Session stopped. Use "Reconnect" to start a new one.'), 'info');
-		}).catch(function() {
-			self.setStatus(_('RPC call failed - is the ttyd-strict rpcd plugin installed?'), 'error');
-		});
-	},
-
-	/* --- dialogs ------------------------------------------------------ */
-
-	showBusyModal: function(s) {
-		var self = this;
-
-		this.setStatus(_('Port busy - a ttyd session with a live client exists.'), 'warning');
-
-		ui.showModal(_('ttyd session busy'), [
-			E('p', {}, _('The terminal port %d is occupied by ttyd (%s).')
-				.format(s.port, this.describeStatus(s))),
-			E('p', {}, _('This has been logged. Terminating it will disconnect the client listed above - do you want to take over the session?')),
-			E('div', { 'class': 'right' }, [
-				E('button', {
-					'class': 'btn',
-					click: function(ev) {
-						ev.preventDefault();
-						ui.hideModal();
-					}
-				}, [ _('Cancel') ]),
-				' ',
-				E('button', {
-					'class': 'btn important',
-					click: this.handleTakeover.bind(this)
-				}, [ _('Take over and restart') ])
-			])
-		]);
 	},
 
 	showOccupiedUnknown: function(s) {
-		this.termHost.innerHTML = '';
-		this.termHost.appendChild(E('em', {}, [ _('no active session') ]));
-		this.setStatus(_('Port %d is held by a non-ttyd process (%s, pid %d) - refusing to touch it. Resolve it manually, then reconnect.')
+		this.placeholder(_('no active session'));
+		this.setStatus(_('Port %d is held by a non-ttyd process (%s, pid %d) - refusing to touch it. Resolve it manually, then reopen this page.')
 			.format(s.port, s.comm || _('unknown'), s.pid || 0), 'error');
 	},
 
@@ -242,7 +188,7 @@ return view.extend({
 
 			if (s.state == 'none') {
 				var now = Date.now();
-				if (!self.userStopped && !self.pollBusy &&
+				if (!self.pollBusy &&
 				    (!self.lastAutoStart || (now - self.lastAutoStart) / 1000 > RESTART_INTERVAL)) {
 					self.lastAutoStart = now;
 					self.pollBusy = true;
@@ -258,8 +204,9 @@ return view.extend({
 				return;
 			}
 
-			self.setStatus(_('Port %d occupied: %s - use "Reconnect" to decide.')
-				.format(s.port, self.describeStatus(s)), 'warning');
+			/* foreign-ttyd with a live client appeared after load:
+			 * re-run the automatic takeover path */
+			self.ensureSession();
 		}).catch(L.noop);
 	},
 
@@ -277,22 +224,11 @@ return view.extend({
 		this.termHost = E('div', { 'class': 'cbi-section', 'style': 'height: 60vh' });
 
 		var view = E('div', {}, [
-			E('div', { 'class': 'right', 'style': 'margin-bottom:.5em' }, [
-				E('button', {
-					'class': 'btn cbi-button',
-					click: this.handleStart.bind(this)
-				}, [ _('Reconnect') ]),
-				' ',
-				E('button', {
-					'class': 'btn cbi-button neutral',
-					click: this.handleStop.bind(this)
-				}, [ _('Stop session') ])
-			]),
 			this.statusEl,
 			this.termHost
 		]);
 
-		this.termHost.appendChild(E('em', {}, [ _('starting session...') ]));
+		this.placeholder(_('starting session...'));
 
 		window.addEventListener('resize', this.fitTerminal.bind(this));
 		requestAnimationFrame(this.fitTerminal.bind(this));
@@ -313,10 +249,8 @@ return view.extend({
 
 		if (!initial)
 			this.setStatus(_('Status probe failed - is the ttyd-strict rpcd plugin installed?'), 'error');
-		else if (initial.state == 'foreign-other')
-			this.showOccupiedUnknown(initial);
 		else
-			this.handleStart();
+			this.ensureSession();
 
 		return view;
 	},
