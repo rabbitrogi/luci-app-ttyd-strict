@@ -57,3 +57,24 @@ sysauth cookie 注入绕过 IAB 表单限制）。
 - 参考实现: https://github.com/rabbitrogi/luci-app-ttyd-strict
 - 安全 issue: https://github.com/openwrt/luci/issues/9014
 - IAB 输入缺陷反馈（ZCode feedback 仓库）: issues #365 / #434 已评论
+
+## 重构为最小 diff（2026-09-09 晚）
+
+按"上游原样 + 最小 diff"重构：config.js / menu.json / po(zh_Hans)
+照抄上游 @a8c110be；Makefile 仅 +jshn 与放置路径适配；改动集中在
+term.js + 新增 rpcd 插件/ACL/uci-defaults。插件改读上游 /etc/config/ttyd
+（第一个实例），-f root 由上游 Config 页配置。git 历史重写为
+import+diff 两提交。集成方式：直接补丁 feeds/luci/applications/
+luci-app-ttyd（本地 package/ 同名包会被 feed 遮蔽，25.12 的
+scripts/feeds 无 override 子命令）。
+
+设备迁移（10.2.49.100）：apk del 旧 luci-app-ttyd + luci-app-ttyd-strict
+→ 安装 feed 补丁版 → uci ttyd interface=eth1 command='/bin/login -f root'。
+
+真机验证（IAB）：上游 Config 页正常渲染（Command 字段可见 -f root）；
+终端页自动会话 + -f root 直达 root shell（无 login 提示）。
+
+期间发现并修复：① 重构时 ACL 丢了 session_status read 段（页面报
+Status probe failed）；② 后台节流标签页会以 ~70s 周期 poll 自动重起
+会话，与新开页面抢端口触发 busy 弹窗（设计边界，弹窗即正确的用户
+决策入口）。
