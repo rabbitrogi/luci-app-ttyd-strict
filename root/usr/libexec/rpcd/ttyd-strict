@@ -45,10 +45,13 @@ log() {
 }
 
 # read the FIRST ttyd instance from the shared upstream uci config
-# (/etc/config/ttyd — anonymous sections, edited by the stock config page)
+# (/etc/config/ttyd — anonymous sections, edited by the stock config page).
+# An absent `interface` means "no -i flag" — ttyd binds 0.0.0.0 on every
+# interface (same semantics as the stock init script; e.g. reaching the
+# terminal via LAN or ZeroTier alike).
 read_config() {
 	PORT=$(uci -q get "$CONF.@ttyd[0].port" || echo 7681)
-	IFACE=$(uci -q get "$CONF.@ttyd[0].interface" || echo lan)
+	IFACE=$(uci -q get "$CONF.@ttyd[0].interface" || echo "")
 	CREDENTIAL=$(uci -q get "$CONF.@ttyd[0].credential" || echo "")
 	COMMAND=$(uci -q get "$CONF.@ttyd[0].command" || echo "/bin/login")
 	UNIX_SOCK=$(uci -q get "$CONF.@ttyd[0].unix_sock" || echo 0)
@@ -188,9 +191,10 @@ start_ours() {
 	[ "$UNIX_SOCK" = "1" ] && { log "FATAL: unix_sock mode is not supported by the strict on-demand plugin (TCP only)"; return 1; }
 
 	# resolve uci interface (@lan / lan) to a device name for ttyd -i,
-	# same as the stock ttyd init script
+	# same as the stock ttyd init script; an EMPTY interface means no -i
+	# flag at all — ttyd then binds 0.0.0.0 on every interface
 	[ "${IFACE#@}" != "$IFACE" ] && IFACE="${IFACE#@}"
-	if [ -r /lib/functions/network.sh ]; then
+	if [ -n "$IFACE" ] && [ -r /lib/functions/network.sh ]; then
 		. /lib/functions/network.sh
 		network_get_device dev "$IFACE"
 	fi
@@ -200,7 +204,7 @@ start_ours() {
 
 	for attempt in 1 2 3; do
 		start-stop-daemon -S -b -m -p "$PIDFILE" -x "$TTYD_BIN" -- \
-			-p "$PORT" -i "$dev" -o ${CREDENTIAL:+-c "$CREDENTIAL"} $COMMAND \
+			-p "$PORT" ${dev:+-i "$dev"} -o ${CREDENTIAL:+-c "$CREDENTIAL"} $COMMAND \
 			|| { log "start-stop-daemon failed"; return 1; }
 
 		# wait until our instance owns the listener (ttyd binds async)

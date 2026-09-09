@@ -111,3 +111,12 @@ Makefile +jshn、term.js、rpcd 插件、ACL、uci-defaults）→ 重建 →
 → none；B1 关闭后直连拒绝；B3 占用时第二 ws 被拒名额唯一；
 C1 uci commit ttyd 不再复活。headless 下 beforeunload 被浏览器
 自动跳过属正常，真浏览器会弹确认框。
+
+## interface 缺省语义对齐上游（2026-09-09 深夜）
+
+用户删除 uci interface 期望 ttyd 监听 0.0.0.0（stock init 语义：
+无 interface 不传 -i），但插件此前回退默认 'lan' → 绑 eth0 →
+从其他接口访问时 iframe 连接被拒。修复：interface 缺省为空 →
+start_ours 不传 -i → ttyd 绑 0.0.0.0（所有接口，含 ZeroTier）。
+设备实测：无 interface 时监听 0.0.0.0:7681，LAN/zt 接口均可达，
+单会话门禁（--once + 页面生命周期）不受影响。
