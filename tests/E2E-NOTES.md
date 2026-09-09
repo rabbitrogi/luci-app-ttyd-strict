@@ -129,3 +129,17 @@ E2E 中"终端内登录/执行命令成功"的结论依赖视觉模型转写截�
 touch 文件 + SSH 查存在）。修复：read_config 读 uci readonly
 （默认 0）→ 非 1 时传 -W，与 stock init 的
 `[ "$readonly" = 0 ] && readonly="-W"` 语义一致。
+
+## takeover 端口释放竞态（2026-09-09 深夜，用户实测发现）
+
+点 Reconnect → Take over 后偶发 iframe 显示连接拒绝、约 10 秒才
+恢复。机制：kill 旧实例后 wait_listener_gone 仅 2s，端口未完全释
+放时新 ttyd 绑定失败 → start_ours 静默重试 2-3 轮（每轮 2s 验
+证）；期间旧 iframe 指向已死端口显示 ERR_CONNECTION_REFUSED，
+rpc 返回后才挂新 iframe。修复：
+- wait_listener_gone 2s→4s；start_ours 每 attempt 前先等残留监
+  听消失
+- 前端 takeover 点击后立即清空旧 iframe 显示 "restarting
+  session..."（不再展示必败的错误页）
+- poll 自愈：会话在跑但 15s 无客户端连接时重挂 iframe 一次
+  （覆盖 iframe 挂错误页的残留场景）

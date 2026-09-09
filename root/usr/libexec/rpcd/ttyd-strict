@@ -172,7 +172,7 @@ probe() {
 
 wait_listener_gone() {
 	local i
-	for i in 1 2 3 4 5 6 7 8 9 10; do
+	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
 		[ -z "$(listener_inode)" ] && return 0
 		sleep 0.2
 	done
@@ -211,6 +211,9 @@ start_ours() {
 	rm -f "$PIDFILE"
 
 	for attempt in 1 2 3; do
+		# a previous attempt (or a dying old instance) may still hold the
+		# port in TIME_WAIT limbo - wait it out before binding again
+		wait_listener_gone
 		start-stop-daemon -S -b -m -p "$PIDFILE" -x "$TTYD_BIN" -- \
 			-p "$PORT" ${dev:+-i "$dev"} -o ${WFLAG:+$WFLAG} ${CREDENTIAL:+-c "$CREDENTIAL"} $COMMAND \
 			|| { log "start-stop-daemon failed"; return 1; }

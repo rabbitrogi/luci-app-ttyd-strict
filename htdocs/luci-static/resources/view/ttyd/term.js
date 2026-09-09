@@ -134,6 +134,13 @@ return view.extend({
 
 		ev && ev.preventDefault();
 
+		/* the old iframe points at the port we are about to kill -
+		 * replace it immediately instead of showing a refused page
+		 * while the takeover RPC restarts the instance */
+		this.termHost.innerHTML = '';
+		this.termHost.appendChild(E('em', {}, [ _('restarting session...') ]));
+		this.setStatus(_('Restarting session - the old client has been disconnected.'), 'info');
+
 		return callSessionTakeover().then(function(res) {
 			ui.hideModal();
 			if (res && res.result == 'started') {
@@ -214,9 +221,22 @@ return view.extend({
 				return;
 
 			if (s.state == 'ours') {
-				self.setStatus(s.client_count > 0
-					? _('Session active (%s)').format(self.describeStatus(s))
-					: _('Session running, waiting for the terminal to connect...'), 'info');
+				if (s.client_count > 0) {
+					self.zeroClientSince = null;
+					self.setStatus(_('Session active (%s)').format(self.describeStatus(s)), 'info');
+				}
+				else {
+					/* session alive but nothing connected: if the iframe
+					 * shows an error page (race during takeover/restart),
+					 * remount it once after a grace period */
+					if (!self.zeroClientSince)
+						self.zeroClientSince = Date.now();
+					else if (Date.now() - self.zeroClientSince > 15000) {
+						self.zeroClientSince = null;
+						self.mountTerminal();
+					}
+					self.setStatus(_('Session running, waiting for the terminal to connect...'), 'info');
+				}
 				return;
 			}
 
