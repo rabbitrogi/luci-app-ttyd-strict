@@ -1,6 +1,11 @@
 {
 	"luci-app-ttyd": {
 		"description": "Grant access to the strict on-demand ttyd terminal",
+		"read": {
+			"ubus": {
+				"ttyd-strict": [ "session_status" ]
+			}
+		},
 		"write": {
 			"ubus": {
 				"ttyd-strict": [ "session_start", "session_takeover", "session_stop" ]
