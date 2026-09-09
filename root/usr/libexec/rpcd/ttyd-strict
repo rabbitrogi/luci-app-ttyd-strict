@@ -54,8 +54,16 @@ read_config() {
 	IFACE=$(uci -q get "$CONF.@ttyd[0].interface" || echo "")
 	CREDENTIAL=$(uci -q get "$CONF.@ttyd[0].credential" || echo "")
 	COMMAND=$(uci -q get "$CONF.@ttyd[0].command" || echo "/bin/login")
+	READONLY=$(uci -q get "$CONF.@ttyd[0].readonly" || echo 0)
 	UNIX_SOCK=$(uci -q get "$CONF.@ttyd[0].unix_sock" || echo 0)
 	[ -n "$COMMAND" ] || COMMAND="/bin/login"
+	# ttyd >= 1.6 defaults to READ-ONLY; pass -W unless readonly=1
+	# (same semantics as the stock init script)
+	if [ "$READONLY" != "1" ]; then
+		WFLAG="-W"
+	else
+		WFLAG=""
+	fi
 }
 
 # ---- port / process probing ------------------------------------------
@@ -204,7 +212,7 @@ start_ours() {
 
 	for attempt in 1 2 3; do
 		start-stop-daemon -S -b -m -p "$PIDFILE" -x "$TTYD_BIN" -- \
-			-p "$PORT" ${dev:+-i "$dev"} -o ${CREDENTIAL:+-c "$CREDENTIAL"} $COMMAND \
+			-p "$PORT" ${dev:+-i "$dev"} -o ${WFLAG:+$WFLAG} ${CREDENTIAL:+-c "$CREDENTIAL"} $COMMAND \
 			|| { log "start-stop-daemon failed"; return 1; }
 
 		# wait until our instance owns the listener (ttyd binds async)

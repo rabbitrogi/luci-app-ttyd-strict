@@ -120,3 +120,12 @@ C1 uci commit ttyd 不再复活。headless 下 beforeunload 被浏览器
 start_ours 不传 -i → ttyd 绑 0.0.0.0（所有接口，含 ZeroTier）。
 设备实测：无 interface 时监听 0.0.0.0:7681，LAN/zt 接口均可达，
 单会话门禁（--once + 页面生命周期）不受影响。
+
+## -W 可写参数缺失（2026-09-09 深夜，用户实测发现）
+
+ttyd >= 1.6 默认只读；插件未传 -W 导致终端完全无法键入。此前
+E2E 中"终端内登录/执行命令成功"的结论依赖视觉模型转写截图，
+存在脑补风险——本次教训：键入类验证必须用设备侧证据（终端内
+touch 文件 + SSH 查存在）。修复：read_config 读 uci readonly
+（默认 0）→ 非 1 时传 -W，与 stock init 的
+`[ "$readonly" = 0 ] && readonly="-W"` 语义一致。

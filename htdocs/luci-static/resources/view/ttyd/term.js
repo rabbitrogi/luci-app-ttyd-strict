@@ -277,17 +277,13 @@ return view.extend({
 		window.addEventListener('resize', this.fitTerminal.bind(this));
 		requestAnimationFrame(this.fitTerminal.bind(this));
 
-		/* Leaving the page with a live session asks for confirmation
-		 * (the browser's own "changes may not be saved" dialog); if the
-		 * user really leaves, pagehide fires the stop beacon so the
-		 * session ends even if the page is parked instead of destroyed
-		 * (bfcache / soft navigation). */
-		window.addEventListener('beforeunload', function(ev) {
-			if (self.sessionActive) {
-				ev.preventDefault();
-				ev.returnValue = '';
-			}
-		});
+		/* No beforeunload confirmation here on purpose: embedded
+		 * browsers (Electron webviews etc.) do not surface the unload
+		 * dialog and silently CANCEL the navigation instead - the user
+		 * gets stuck on the page while it holds the single client slot.
+		 * Letting the page go is safe: the websocket dies with it and
+		 * the pagehide beacon below stops the session even if the page
+		 * is parked (bfcache) rather than destroyed. */
 		window.addEventListener('pagehide', function() {
 			if (self.sessionActive)
 				self.stopSessionOnLeave();
