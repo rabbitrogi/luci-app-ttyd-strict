@@ -78,3 +78,13 @@ scripts/feeds 无 override 子命令）。
 Status probe failed）；② 后台节流标签页会以 ~70s 周期 poll 自动重起
 会话，与新开页面抢端口触发 busy 弹窗（设计边界，弹窗即正确的用户
 决策入口）。
+
+## 干净重建验证（2026-09-09 晚，最终）
+
+流程：复查 diff → orb 上 feeds/luci git checkout+clean 还原上游
+原样（与 import 提交逐文件比对零漂移）→ 重新打补丁（恰好 5 处：
+Makefile +jshn、term.js、rpcd 插件、ACL、uci-defaults）→ 重建 →
+设备 apk del/add 换装 → IAB 全流程测试。
+
+结果：登录 → 终端页自动会话 → -f root 直达 root shell（无 login
+提示）→ 合成输入敲入 echo CLEAN-REBUILD-OK/date 输出正常。
