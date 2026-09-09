@@ -2,16 +2,28 @@
 # luci-app-ttyd (strict fork) first-boot setup
 #
 # The strict model runs ttyd on demand from the LuCI terminal page,
-# driven by the ttyd-strict rpcd plugin — the persistent init service
-# is not used and would permanently hold the port. Disable it (its uci
-# config /etc/config/ttyd stays and is edited via the Config page).
+# driven by the ttyd-strict rpcd plugin; the persistent init service
+# must never hold the port.
+#
+# Disabling the service alone is NOT enough: ttyd.init registers
+# procd_add_reload_trigger("ttyd"), so ANY `uci commit ttyd` (Config
+# page "Save & Apply" included) reloads the service, and procd reload
+# of a stopped service effectively STARTS it - re-exposing the
+# unauthenticated persistent listener no matter what. Setting
+# enable=0 is the real fence: the init script itself skips instances
+# with enable=0 on start/reload.
+
+uci -q batch <<-EOF >/dev/null
+	set ttyd.@ttyd[0].enable='0'
+	commit ttyd
+EOF
 
 if /etc/init.d/ttyd enabled 2>/dev/null; then
 	/etc/init.d/ttyd disable
-	/etc/init.d/ttyd stop 2>/dev/null
-	logger -t ttyd-strict -p daemon.notice \
-		"disabled the stock persistent ttyd service (conflicts with strict on-demand mode)"
 fi
+/etc/init.d/ttyd stop 2>/dev/null
+logger -t ttyd-strict -p daemon.notice \
+	"persistent ttyd service stopped, enable=0 set (strict on-demand mode; uci commit ttyd must not revive it)"
 
 # let rpcd pick up the new plugin
 /etc/init.d/rpcd restart 2>/dev/null

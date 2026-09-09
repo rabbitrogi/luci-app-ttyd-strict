@@ -88,3 +88,26 @@ Makefile +jshn、term.js、rpcd 插件、ACL、uci-defaults）→ 重建 →
 
 结果：登录 → 终端页自动会话 → -f root 直达 root shell（无 login
 提示）→ 合成输入敲入 echo CLEAN-REBUILD-OK/date 输出正常。
+
+## 泄漏事件复盘与修复（2026-09-09 夜，重启清场后全绿）
+
+用户实测：终端页切到别的菜单后直连 7681 可得 root shell。复盘
+真相为两因叠加：
+1. 根因：ttyd.init 的 procd_add_reload_trigger —— 任何
+   `uci commit ttyd`（含 Config 页 Save&Apply）会 reload 已 disable
+   的持久服务，且当时 /etc/config/ttyd 因多轮 apk del/add 退化为
+   残缺配置（enable 项丢失，默认 1），持久 ttyd（无 --once）抢注
+   端口并接受多客户端 —— 直连即 root。
+   修复：uci-defaults 设 `enable=0`（init 脚本自身在 start/reload
+   时跳过 enable=0 的实例，对 reload trigger 免疫）；配合干净
+   重置（卸载+重写上游原生配置+重装+reboot）清场。
+2. 加固：term.js 增加 beforeunload（活跃会话时离开页面确认，即
+   原版语义）与 pagehide 时 sendBeacon 调 session_stop 的兜底。
+
+澄清两点误判：LuCI 菜单是硬导航（无 SPA）；argon 一级菜单点击
+仅展开子菜单不导航（测试需点叶子项）。
+
+干净重启后复测六项全过：A1 开页 ours+1client；A2 叶子菜单切走
+→ none；B1 关闭后直连拒绝；B3 占用时第二 ws 被拒名额唯一；
+C1 uci commit ttyd 不再复活。headless 下 beforeunload 被浏览器
+自动跳过属正常，真浏览器会弹确认框。

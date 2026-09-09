@@ -69,7 +69,22 @@ return view.extend({
 			src: this.terminalUrl(),
 			style: 'width: 100%; height: 100%; border: none; border-radius: 3px;'
 		}));
+		this.sessionActive = true;
 		this.fitTerminal();
+	},
+
+	/* Fire-and-forget session_stop for the unload path: the websocket
+	 * dying with the page already ends the --once session; this beacon
+	 * is the belt-and-suspenders for cases where the page is parked
+	 * (bfcache, soft navigation) instead of destroyed. */
+	stopSessionOnLeave: function() {
+		try {
+			navigator.sendBeacon(L.url('admin/ubus'), new Blob([JSON.stringify({
+				jsonrpc: '2.0', id: 99, method: 'call',
+				params: [L.env.sessionid, 'ttyd-strict', 'session_stop', {}]
+			})], { type: 'application/json' }));
+		}
+		catch (e) {}
 	},
 
 	describeStatus: function(s) {
@@ -147,6 +162,7 @@ return view.extend({
 		return callSessionStop().then(function() {
 			self.termHost.innerHTML = '';
 			self.termHost.appendChild(E('em', {}, [ _('no active session') ]));
+			self.sessionActive = false;
 			self.setStatus(_('Session stopped. Use "Reconnect" to start a new one.'), 'info');
 		}).catch(function() {
 			self.setStatus(_('RPC call failed - is the ttyd-strict rpcd plugin installed?'), 'error');
@@ -230,6 +246,7 @@ return view.extend({
 	/* --- view ---------------------------------------------------------- */
 
 	render: function(initial) {
+		var self = this;
 		var port = uci.get_first('ttyd', 'ttyd', 'port') || '7681';
 
 		if (port === '0')
@@ -259,6 +276,22 @@ return view.extend({
 
 		window.addEventListener('resize', this.fitTerminal.bind(this));
 		requestAnimationFrame(this.fitTerminal.bind(this));
+
+		/* Leaving the page with a live session asks for confirmation
+		 * (the browser's own "changes may not be saved" dialog); if the
+		 * user really leaves, pagehide fires the stop beacon so the
+		 * session ends even if the page is parked instead of destroyed
+		 * (bfcache / soft navigation). */
+		window.addEventListener('beforeunload', function(ev) {
+			if (self.sessionActive) {
+				ev.preventDefault();
+				ev.returnValue = '';
+			}
+		});
+		window.addEventListener('pagehide', function() {
+			if (self.sessionActive)
+				self.stopSessionOnLeave();
+		});
 
 		poll.add(this.pollStatus.bind(this), 10);
 
