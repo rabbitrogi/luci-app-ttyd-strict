@@ -55,6 +55,13 @@ return view.extend({
 
 		if (h > 240)
 			this.termHost.style.height = h + 'px';
+
+		/* second pass: absorb whatever still overflows the viewport
+		 * (theme footer below the view etc.) so the whole page fits
+		 * and no browser scrollbar appears - works in any theme */
+		var overflow = document.documentElement.scrollHeight - window.innerHeight;
+		if (overflow > 0 && h - overflow - 2 > 240)
+			this.termHost.style.height = (h - overflow - 2) + 'px';
 	},
 
 	setStatus: function(text, kind) {

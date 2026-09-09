@@ -154,3 +154,10 @@ rpc 返回后才挂新 iframe。修复：
   自动接管（状态栏提示 + 设备日志留痕）
 - 离页面自动停（ws 断 + pagehide beacon，不变）
 - poll 自愈保留（none 自动重启 / 15s 无客户端重挂 iframe）
+
+## 视口完整适配（2026-09-09 深夜）
+
+fitTerminal 增加第二遍"溢出吸收"：先撑满视口剩余，再量
+documentElement.scrollHeight 与 innerHeight 的差值（footer 等）
+并扣掉——整页恰好容纳，浏览器滚动条消失，footer 完整可见。
+主题无关（不量 footer 具体高度）。
