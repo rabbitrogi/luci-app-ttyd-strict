@@ -1,0 +1,19 @@
+#!/bin/sh
+# luci-app-ttyd (strict fork) first-boot setup
+#
+# The strict model runs ttyd on demand from the LuCI terminal page,
+# driven by the ttyd-strict rpcd plugin — the persistent init service
+# is not used and would permanently hold the port. Disable it (its uci
+# config /etc/config/ttyd stays and is edited via the Config page).
+
+if /etc/init.d/ttyd enabled 2>/dev/null; then
+	/etc/init.d/ttyd disable
+	/etc/init.d/ttyd stop 2>/dev/null
+	logger -t ttyd-strict -p daemon.notice \
+		"disabled the stock persistent ttyd service (conflicts with strict on-demand mode)"
+fi
+
+# let rpcd pick up the new plugin
+/etc/init.d/rpcd restart 2>/dev/null
+
+exit 0

@@ -1,0 +1,403 @@
+#!/bin/sh
+#
+# ttyd-strict - rpcd plugin for strict single-session on-demand ttyd
+#
+# Lifecycle model:
+#   - ttyd runs ONLY while a LuCI terminal page is using it, started on
+#     demand by this plugin and spawned with `-o` (--once): it accepts
+#     exactly one websocket client, refuses everyone else, and exits by
+#     itself when that client disconnects (page close / refresh).
+#   - Before starting, the port is probed. An existing ttyd with no live
+#     client is reaped automatically (stale page refresh). An existing
+#     ttyd WITH a live client is never killed silently: the caller gets
+#     a "busy" result describing who is connected (pid, since, client
+#     IPs) and an explicit takeover call is required to replace it.
+#     Non-ttyd listeners on the port are reported but never touched.
+#
+# ubus object name = script file name ("ttyd-strict"). Methods:
+#   session_status    - probe port/ttyd/client state, no side effects
+#   session_start     - start a session (auto-reap clientless instances)
+#   session_takeover  - kill occupied ttyd (user-confirmed) and start
+#   session_stop      - stop OUR instance only (never foreign ones)
+#
+# All decisions are logged via logger(1), tag "ttyd-strict".
+#
+
+. /usr/share/libubox/jshn.sh
+. /lib/functions.sh
+
+TAG="ttyd-strict"
+PIDFILE="/var/run/ttyd-strict.pid"
+LOCKDIR="/var/lock/ttyd-strict-ctl"
+TTYD_BIN="/usr/bin/ttyd"
+CONF="ttyd"
+
+# probe results (globals)
+STATE=""           # none | ours | foreign-ttyd | foreign-other
+PID=""
+COMM=""
+STARTED=""
+CLIENTS=""         # newline-separated ip:port list
+CLIENT_COUNT=0
+
+log() {
+	logger -t "$TAG" -p daemon.notice "$@"
+}
+
+# read the FIRST ttyd instance from the shared upstream uci config
+# (/etc/config/ttyd — anonymous sections, edited by the stock config page)
+read_config() {
+	PORT=$(uci -q get "$CONF.@ttyd[0].port" || echo 7681)
+	IFACE=$(uci -q get "$CONF.@ttyd[0].interface" || echo lan)
+	CREDENTIAL=$(uci -q get "$CONF.@ttyd[0].credential" || echo "")
+	COMMAND=$(uci -q get "$CONF.@ttyd[0].command" || echo "/bin/login")
+	UNIX_SOCK=$(uci -q get "$CONF.@ttyd[0].unix_sock" || echo 0)
+	[ -n "$COMMAND" ] || COMMAND="/bin/login"
+}
+
+# ---- port / process probing ------------------------------------------
+
+# inode of the LISTEN socket on $PORT from /proc/net/tcp (empty = no listener)
+listener_inode() {
+	awk -v p=":$(printf '%04X' "$PORT")\$" '$4 == "0A" && $2 ~ p { print $10; exit }' /proc/net/tcp 2>/dev/null
+}
+
+# ESTABLISHED client endpoints (remote ip:port) of $PORT via netstat
+port_clients() {
+	netstat -tn 2>/dev/null | awk -v p=":${PORT}\$" \
+		'$6 == "ESTABLISHED" && $4 ~ p { print $5 }'
+}
+
+# pid owning the given socket inode, by scanning /proc/*/fd (no -p in
+# busybox netstat). Best-effort: empty when unreadable.
+pid_of_inode() {
+	local target="socket:[$1]" fd p
+	for p in /proc/[0-9]*/fd; do
+		p="${p%/fd}"
+		for fd in "$p"/fd/*; do
+			[ "$(readlink "$fd" 2>/dev/null)" = "$target" ] && {
+				echo "${p#/proc/}"
+				return 0
+			}
+		done
+	done
+	return 0
+}
+
+# our instance pid: pidfile entry that is alive and really is ttyd
+our_pid() {
+	local pid
+	pid=$(cat "$PIDFILE" 2>/dev/null)
+	[ -n "$pid" ] && [ -d "/proc/$pid" ] && \
+		[ "$(cat "/proc/$pid/comm" 2>/dev/null)" = "ttyd" ] && echo "$pid"
+	return 0
+}
+
+# process start time as epoch, from /proc/pid/stat field 22 (clk_tck=100)
+proc_start_epoch() {
+	local stat tick up boot
+	stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 0
+	stat="${stat#*) }"          # drop "pid (comm) " prefix
+	set -- $stat                # original field N is now $(N-2)
+	tick="${20}"
+	[ -n "$tick" ] || return 0
+	read -r up _ < /proc/uptime 2>/dev/null || return 0
+	boot=$(date +%s)
+	echo $(( boot - ${up%.*} + tick / 100 ))
+}
+
+# Fill STATE/PID/COMM/STARTED/CLIENTS/CLIENT_COUNT.
+# Also reaps a stale pidfile instance of ours that no longer owns the port.
+probe() {
+	STATE="none"; PID=""; COMM=""; STARTED=""; CLIENT_COUNT=0
+	local inode opid
+
+	CLIENTS=$(port_clients)
+	if [ -n "$CLIENTS" ]; then
+		CLIENT_COUNT=$(( $(printf '%s\n' "$CLIENTS" | wc -l) ))
+	else
+		CLIENT_COUNT=0
+	fi
+
+	inode=$(listener_inode)
+	opid=$(our_pid)
+
+	if [ -z "$inode" ]; then
+		rm -f "$PIDFILE" 2>/dev/null
+		[ -n "$opid" ] && {
+			log "reaping orphan ttyd instance pid=$opid (no listener on port $PORT)"
+			kill "$opid" 2>/dev/null
+		}
+		return 0
+	fi
+
+	PID=$(pid_of_inode "$inode")
+	[ -n "$PID" ] && COMM=$(cat "/proc/$PID/comm" 2>/dev/null)
+
+	if [ -n "$opid" ]; then
+		if [ "$opid" = "$PID" ]; then
+			STATE="ours"
+		else
+			# our stale instance running but not owning the port
+			log "reaping stale ttyd instance pid=$opid (port $PORT owned by ${PID:-unknown})"
+			kill "$opid" 2>/dev/null
+			rm -f "$PIDFILE"
+		fi
+	fi
+
+	[ "$STATE" = "ours" ] || {
+		if [ "$COMM" = "ttyd" ]; then
+			STATE="foreign-ttyd"
+		else
+			STATE="foreign-other"
+		fi
+	}
+
+	[ -n "$PID" ] && [ "$STATE" != "foreign-other" ] && STARTED=$(proc_start_epoch "$PID")
+	return 0
+}
+
+# ---- start / stop helpers --------------------------------------------
+
+wait_listener_gone() {
+	local i
+	for i in 1 2 3 4 5 6 7 8 9 10; do
+		[ -z "$(listener_inode)" ] && return 0
+		sleep 0.2
+	done
+	return 1
+}
+
+# TERM, grace period, then KILL. $1=pid $2=reason for the log
+kill_pid() {
+	local pid="$1" reason="$2" i
+	kill "$pid" 2>/dev/null
+	for i in 1 2 3 4 5 6 7 8; do
+		[ -d "/proc/$pid" ] || return 0
+		sleep 0.2
+	done
+	log "pid=$pid ignored TERM ($reason), sending KILL"
+	kill -9 "$pid" 2>/dev/null
+	sleep 0.2
+	[ -d "/proc/$pid" ]
+}
+
+start_ours() {
+	local dev="" attempt i pid inode
+	[ -x "$TTYD_BIN" ] || { log "FATAL: $TTYD_BIN not found (install ttyd package)"; return 1; }
+	[ "$UNIX_SOCK" = "1" ] && { log "FATAL: unix_sock mode is not supported by the strict on-demand plugin (TCP only)"; return 1; }
+
+	# resolve uci interface (@lan / lan) to a device name for ttyd -i,
+	# same as the stock ttyd init script
+	[ "${IFACE#@}" != "$IFACE" ] && IFACE="${IFACE#@}"
+	if [ -r /lib/functions/network.sh ]; then
+		. /lib/functions/network.sh
+		network_get_device dev "$IFACE"
+	fi
+	[ -n "$dev" ] || dev="$IFACE"    # allow raw device or IP in uci
+
+	rm -f "$PIDFILE"
+
+	for attempt in 1 2 3; do
+		start-stop-daemon -S -b -m -p "$PIDFILE" -x "$TTYD_BIN" -- \
+			-p "$PORT" -i "$dev" -o ${CREDENTIAL:+-c "$CREDENTIAL"} $COMMAND \
+			|| { log "start-stop-daemon failed"; return 1; }
+
+		# wait until our instance owns the listener (ttyd binds async)
+		for i in 1 2 3 4 5 6 7 8 9 10; do
+			sleep 0.2
+			pid=$(our_pid)
+			inode=$(listener_inode)
+			[ -n "$pid" ] && [ -n "$inode" ] && \
+				[ "$(pid_of_inode "$inode")" = "$pid" ] && {
+					log "session started: pid=$pid port=$PORT iface=$dev command=[$COMMAND]"
+					return 0
+				}
+		done
+		# retry: previous listener may have been dying when we bound
+	done
+	log "FATAL: ttyd did not come up on port $PORT"
+	return 1
+}
+
+# ---- serialization ----------------------------------------------------
+
+acquire_lock() {
+	local i=0 now ts
+	while ! mkdir "$LOCKDIR" 2>/dev/null; do
+		ts=$(cat "$LOCKDIR/ts" 2>/dev/null)
+		if [ -n "$ts" ]; then
+			now=$(date +%s)
+			[ $((now - ts)) -gt 15 ] && {
+				log "removing stale control lock"
+				rm -rf "$LOCKDIR"
+				continue
+			}
+		fi
+		i=$((i + 1))
+		[ "$i" -ge 50 ] && return 1
+		sleep 0.1
+	done
+	date +%s > "$LOCKDIR/ts"
+	# release the lock no matter how the script exits (an aborted call
+	# must not block the next page for 15 stale-lock seconds)
+	trap 'release_lock' EXIT
+	return 0
+}
+
+release_lock() {
+	rm -rf "$LOCKDIR" 2>/dev/null
+	return 0
+}
+
+# ---- JSON emitters ----------------------------------------------------
+
+emit_clients_array() {
+	local c
+	json_add_array "clients"
+	for c in $CLIENTS; do
+		json_add_object ""
+		json_add_string ip "${c%:*}"
+		json_add_int port "${c##*:}"
+		json_close_object
+	done
+	json_close_array
+}
+
+emit_status() {
+	json_init
+	json_add_int port "$PORT"
+	json_add_string state "$STATE"
+	[ -n "$PID" ] && json_add_int pid "$PID"
+	[ -n "$STARTED" ] && json_add_int started "$STARTED"
+	[ -n "$COMM" ] && json_add_string comm "$COMM"
+	json_add_int client_count "$CLIENT_COUNT"
+	emit_clients_array
+	json_dump
+}
+
+# busy/occupied payload for session_start (drives the takeover dialog)
+emit_busy() {
+	emit_status
+}
+
+log_busy() {
+	log "port $PORT busy: state=$STATE pid=${PID:-?} clients=[$(printf '%s ' $CLIENTS)]"
+}
+
+# ---- methods ----------------------------------------------------------
+
+case "$1" in
+	list)
+		cat <<'EOF'
+{
+	"session_status": {},
+	"session_start": {},
+	"session_takeover": {},
+	"session_stop": {}
+}
+EOF
+	;;
+	call)
+		read_config
+
+		case "$2" in
+			session_status)
+				probe
+				emit_status
+			;;
+			session_start)
+				acquire_lock || {
+					json_init; json_add_string result "lock-timeout"; json_dump
+					exit 1
+				}
+				probe
+				case "$STATE" in
+					none)
+						if start_ours; then
+							json_init; json_add_string result "started"; json_dump
+						else
+							json_init; json_add_string result "start-failed"; json_dump
+							exit 1
+						fi
+					;;
+					ours|foreign-ttyd)
+						if [ "$CLIENT_COUNT" -eq 0 ]; then
+							# nobody connected (stale page refresh): reap, restart
+							log "reaping clientless ttyd pid=$PID (state=$STATE), restarting"
+							kill_pid "$PID" "clientless restart"
+							wait_listener_gone
+							if start_ours; then
+								json_init; json_add_string result "started"; json_dump
+							else
+								json_init; json_add_string result "start-failed"; json_dump
+								exit 1
+							fi
+						else
+							log_busy
+							emit_busy
+						fi
+					;;
+					foreign-other)
+						log "port $PORT occupied by non-ttyd process: pid=${PID:-unknown} comm=${COMM:-unknown}"
+						emit_status
+					;;
+				esac
+				release_lock
+			;;
+			session_takeover)
+				# explicit user decision from the LuCI dialog: kill the
+				# occupied ttyd (ours or foreign) and start a fresh one
+				acquire_lock || {
+					json_init; json_add_string result "lock-timeout"; json_dump
+					exit 1
+				}
+				probe
+				case "$STATE" in
+					none)
+						if start_ours; then
+							json_init; json_add_string result "started"; json_dump
+						else
+							json_init; json_add_string result "start-failed"; json_dump
+							exit 1
+						fi
+					;;
+					ours|foreign-ttyd)
+						log "takeover: killing ttyd pid=$PID (clients=[$(printf '%s ' $CLIENTS)])"
+						kill_pid "$PID" "user takeover"
+						wait_listener_gone
+						if start_ours; then
+							json_init; json_add_string result "started"; json_dump
+						else
+							json_init; json_add_string result "start-failed"; json_dump
+							exit 1
+						fi
+					;;
+					foreign-other)
+						log "takeover refused: port $PORT held by non-ttyd process (pid=${PID:-unknown} comm=${COMM:-unknown})"
+						emit_status
+					;;
+				esac
+				release_lock
+			;;
+			session_stop)
+				acquire_lock || {
+					json_init; json_add_string result "lock-timeout"; json_dump
+					exit 1
+				}
+				probe
+				if [ "$STATE" = "ours" ]; then
+					log "session stopped by request: pid=$PID"
+					kill_pid "$PID" "session_stop"
+					wait_listener_gone
+				elif [ "$STATE" != "none" ]; then
+					log "session_stop: port $PORT held by $STATE (pid=${PID:-unknown}), not touching"
+				fi
+				json_init; json_add_string result "stopped"; json_dump
+				release_lock
+			;;
+		esac
+	;;
+esac
+
+exit 0
