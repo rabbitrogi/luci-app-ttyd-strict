@@ -18,15 +18,14 @@
  *     rpcd plugin; a leftover session from a stale tab is reaped or
  *     taken over automatically - the syslog on the device records
  *     every takeover;
- *   - the listener runs with --once: typing exit closes the websocket
- *     and ttyd exits immediately (nothing to maintain). The focused
- *     page's poll notices the dead session and simply re-enters the
- *     terminal (same as clicking the Terminal menu again): fresh
- *     listener, freshly mounted iframe. There is no "reconnect" state
- *     to preserve - every recovery is a clean new start;
- *   - leaving the page closes the websocket, which ends the --once
- *     instance by itself; a restored listener nobody watches anymore
- *     is reaped by the plugin-side heartbeat (no page polls = stale);
+ *   - the listener runs with -m 1 (max ONE client): typing exit ends
+ *     the shell, ttyd stays listening, and the frontend's own
+ *     "Press Enter to Reconnect" prompt works exactly like upstream -
+ *     reconnection is always user-driven (Enter), never automatic;
+ *   - leaving the page ends the listener: a pagehide beacon calls
+ *     session_stop scoped to the pid THIS page owned (a stale beacon
+ *     is a no-op); if the beacon is lost (browser crash), the
+ *     plugin-side watchdog reaps the clientless listener;
  *   - the iframe fills the viewport below it, absorbing whatever the
  *     theme places above/below so the page never gets a scrollbar.
  * The only extra UI is an error banner for conditions the user must
@@ -225,18 +224,9 @@ return view.extend({
 				return;
 			}
 
-			/* state 'none': the --once instance ended (user typed
-			 * exit, or it crashed). Re-enter the terminal - exactly
-			 * what clicking the Terminal menu does again: fresh
-			 * session, freshly mounted iframe, clean new start. The
-			 * 5s throttle keeps a crash-looping instance from
-			 * spinning. */
-			var now = Date.now();
-			if (!self.pollBusy &&
-			    (!self.lastAutoStart || (now - self.lastAutoStart) / 1000 > 5)) {
-				self.lastAutoStart = now;
-				self.ensureSession();
-			}
+			/* state 'none' (instance gone - crash or stopped):
+			 * nothing automatic; the user re-enters the page or hits
+			 * Enter after a fresh mount on next visit */
 
 			/* foreign-ttyd with a live client appeared after load:
 			 * re-run the automatic takeover path */
@@ -272,6 +262,24 @@ return view.extend({
 		var mo = new MutationObserver(this.fitTerminal.bind(this));
 		mo.observe(document.getElementById('maincontent') || document.body,
 			{ childList: true, subtree: true });
+
+		/* leaving the page must end the listener. With -m 1 the ws
+		 * closing no longer stops ttyd, so a pagehide beacon calls
+		 * session_stop - scoped to the pid THIS page owned, so a stale
+		 * beacon (arriving after a newer page already took over) is a
+		 * logged no-op and can never kill the new session. */
+		window.addEventListener('pagehide', function() {
+			if (!self.ownedPid)
+				return;
+			try {
+				navigator.sendBeacon(L.url('admin/ubus'), new Blob([JSON.stringify({
+					jsonrpc: '2.0', id: 99, method: 'call',
+					params: [L.env.sessionid, 'ttyd-strict', 'session_stop',
+						{ pid: self.ownedPid }]
+				})], { type: 'application/json' }));
+			}
+			catch (e) {}
+		});
 
 		/* plain interval instead of LuCI's poll framework: poll.add()
 		 * makes the theme render a refresh control in the tab bar which

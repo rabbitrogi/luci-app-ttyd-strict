@@ -31,12 +31,11 @@ PIDFILE="/var/run/ttyd-strict.pid"
 LOCKDIR="/var/lock/ttyd-strict-ctl"
 TTYD_BIN="/usr/bin/ttyd"
 CONF="ttyd"
-# orphan sweeper: --once exits when the client disconnects, but a
-# RESTORED listener (waiting for the user to press Enter) has no
-# client and never triggers it. Every plugin call refreshes the
-# heartbeat file (an open page polls every ~10s); a clientless
-# listener whose heartbeat went stale is reaped - no page is watching
-# it anymore.
+# orphan sweeper: with -m 1 the listener outlives its client. Every
+# plugin call refreshes the heartbeat file (an open page polls every
+# ~10s); a clientless listener whose heartbeat went stale is reaped -
+# no page is watching it anymore. This replaces the old background
+# watchdog process entirely.
 HEARTBEAT_SECS="${HEARTBEAT_SECS:-60}"
 
 # probe results (globals)
@@ -69,7 +68,6 @@ heartbeat_stale() {
 # refresh on exit, AFTER probe ran: the staleness check inside this
 # invocation must see the PREVIOUS call's heartbeat
 trap 'heartbeat_refresh' EXIT
-
 # read the FIRST ttyd instance from the shared upstream uci config
 # (/etc/config/ttyd — anonymous sections, edited by the stock config page).
 # An absent `interface` means "no -i flag" — ttyd binds 0.0.0.0 on every
@@ -192,8 +190,8 @@ probe() {
 
 	[ -n "$PID" ] && [ "$STATE" != "foreign-other" ] && STARTED=$(proc_start_epoch "$PID")
 
-	# restored listener nobody is watching anymore: no client and no
-	# page poll since HEARTBEAT_SECS - reap it (--once never will)
+	# listener nobody is watching anymore: no client and no page poll
+	# since HEARTBEAT_SECS - reap it (lost pagehide beacons, crashes)
 	if [ "$STATE" = "ours" ] && [ "$CLIENT_COUNT" -eq 0 ] && heartbeat_stale; then
 		log "reaping unwatched clientless listener pid=$PID (heartbeat stale)"
 		kill_pid "$PID" "heartbeat stale"
@@ -249,7 +247,8 @@ start_ours() {
 		# port in TIME_WAIT limbo - wait it out before binding again
 		wait_listener_gone
 		start-stop-daemon -S -b -m -p "$PIDFILE" -x "$TTYD_BIN" -- \
-			-p "$PORT" ${dev:+-i "$dev"} -o ${WFLAG:+$WFLAG} ${CREDENTIAL:+-c "$CREDENTIAL"} $COMMAND \
+			-p "$PORT" ${dev:+-i "$dev"} -m 1 ${WFLAG:+$WFLAG} \
+			-t disableReconnect=true ${CREDENTIAL:+-c "$CREDENTIAL"} $COMMAND \
 			|| { log "start-stop-daemon failed"; return 1; }
 
 		# wait until our instance owns the listener (ttyd binds async)

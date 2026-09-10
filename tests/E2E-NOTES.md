@@ -325,3 +325,19 @@ E2E：exit→none→轮询≤10s 自动重入（新 pid、新挂载）✓✓。
 的 grep marker 全部失配，一度误判设备装了上游原版——装后核验
 必须用压缩态 marker；②浏览器中已打开的页面跑的是加载时的旧
 内存 JS，部署后必须刷新才生效。
+
+## 终版：-m 1 + disableReconnect=true（2026-09-10 深夜定稿）
+
+用户需求定稿：exit 后必须静置等待用户回车，绝不自动重连。
+机制链完整闭环：
+- -m 1：shell 退出后监听器同 pid 存活（等待回车期间端口在、
+  单客户端排他在）
+- -t disableReconnect=true：ttyd 客户端选项，前端源码中它使
+  doReconnect=false → 任何断线（含异常码）都走 "Press ⏎ to
+  Reconnect" 分支；回车处理器不受影响 → 用户回车 = 重连
+- 心跳（替换看门狗进程）：页面轮询续命；页面消失 + beacon 丢失
+  时，无客户端监听器 60s 后被 probe 收掉
+- pagehide beacon（pid 认领）：页面离开立即停监听器
+E2E 四连：进入 ours+1 ✓；exit → ours+0 同 pid ✓；20 秒静置
+client=0 不自动重连 ✓✓（核心断言）；敲回车 → ours+2 同 pid
+重连 ✓✓。用户浏览器实测对齐（旧内存 JS 页面需刷新一次）。
