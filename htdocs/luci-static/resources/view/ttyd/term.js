@@ -12,8 +12,12 @@
  *     rpcd plugin (single client, --once); a leftover session from a
  *     stale tab is reaped or taken over automatically - the syslog on
  *     the device records every takeover;
- *   - leaving the page ends the session (the websocket dies with the
- *     document; a pagehide beacon stops the instance as backstop);
+ *   - leaving the page ends the session: the websocket dies with the
+ *     document (page unload AND bfcache entry both close it), which
+ *     ends the --once instance. No unload beacon - an asynchronous
+ *     session_stop from a departing page can arrive after the NEXT
+ *     page already started its own session and would kill it (the
+ *     "Press Enter to Reconnect" assassin);
  *   - the iframe fills the viewport below it, absorbing whatever the
  *     theme places above/below so the page never gets a scrollbar.
  * The only extra UI is an error banner for conditions the user must
@@ -28,9 +32,6 @@ var callSessionStart = rpc.declare({
 });
 var callSessionTakeover = rpc.declare({
 	object: 'ttyd-strict', method: 'session_takeover'
-});
-var callSessionStop = rpc.declare({
-	object: 'ttyd-strict', method: 'session_stop'
 });
 
 var RESTART_INTERVAL = 15;   /* min seconds between automatic restarts */
@@ -120,22 +121,7 @@ return view.extend({
 			src: this.terminalUrl(),
 			style: 'width: 100%; height: 100%; border: none; border-radius: 3px;'
 		}));
-		this.sessionActive = true;
 		this.fitTerminal();
-	},
-
-	/* Fire-and-forget session_stop for the unload path: the websocket
-	 * dying with the page already ends the --once session; this beacon
-	 * is the belt-and-suspenders for cases where the page is parked
-	 * (bfcache, soft navigation) instead of destroyed. */
-	stopSessionOnLeave: function() {
-		try {
-			navigator.sendBeacon(L.url('admin/ubus'), new Blob([JSON.stringify({
-				jsonrpc: '2.0', id: 99, method: 'call',
-				params: [L.env.sessionid, 'ttyd-strict', 'session_stop', {}]
-			})], { type: 'application/json' }));
-		}
-		catch (e) {}
 	},
 
 	showError: function(text) {
@@ -240,7 +226,6 @@ return view.extend({
 	/* --- view ---------------------------------------------------------- */
 
 	render: function() {
-		var self = this;
 		var port = uci.get_first('ttyd', 'ttyd', 'port') || '7681';
 
 		if (port === '0')
@@ -265,18 +250,6 @@ return view.extend({
 		var mo = new MutationObserver(this.fitTerminal.bind(this));
 		mo.observe(document.getElementById('maincontent') || document.body,
 			{ childList: true, subtree: true });
-
-		/* No beforeunload confirmation here on purpose: embedded
-		 * browsers (Electron webviews etc.) do not surface the unload
-		 * dialog and silently CANCEL the navigation instead - the user
-		 * gets stuck on the page while it holds the single client slot.
-		 * Letting the page go is safe: the websocket dies with it and
-		 * the pagehide beacon below stops the session even if the page
-		 * is parked (bfcache) rather than destroyed. */
-		window.addEventListener('pagehide', function() {
-			if (self.sessionActive)
-				self.stopSessionOnLeave();
-		});
 
 		/* plain interval instead of LuCI's poll framework: poll.add()
 		 * makes the theme render a refresh control in the tab bar which

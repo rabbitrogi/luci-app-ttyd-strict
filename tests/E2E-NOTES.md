@@ -222,3 +222,18 @@ headless 回归 1280/500/400 宽全部 belowFold=0（footer 隐藏时同
 load/render 签名回归上游形态（load 仅 uci.load）。orb feed 树顺
 带清除两处早期误 rsync 的杂散文件。headless 回归：进入即终端、
 无状态栏、belowFold=0、跨 10 秒高度 619px 纹丝不动。
+
+## 迟到 beacon 暗杀新会话（2026-09-10，移除 pagehide beacon）
+
+症状回归且高频化：刷新/点终端页签后频出 "Press 回车
+Reconnect"。机制：旧页卸载时 sendBeacon(session_stop) 异步在途；
+新页 ensureSession（本版少了 status 预探测往返，start 完成得更
+早）刚起好新实例，迟到的 beacon 把它按 ours 杀掉——终端挂在被
+杀实例上。此前版本因 load() 先行 RPC 往返，start 恰好落在
+beacon 之后而侥幸无恙。
+
+beacon 本属"保险带"，但 ws 断开（页面卸载与 bfcache 进入都会强
+制关闭 ws）已让 --once 实例退出，beacon 从未实际救场、反成杀
+手——连同 sessionActive 标记与 callSessionStop 声明整体移除。
+headless 5/5 连续刷新回归：每次 ours+1client+新 pid，最终会话
+无迟到 stop（日志核对 started 与 stopped 的相对位置）。
