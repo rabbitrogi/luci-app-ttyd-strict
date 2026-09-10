@@ -176,3 +176,12 @@ subtree）：框架在视图渲染之后异步拼装的任何行（页签栏、�
 器、未来框架变化）都会触发重算，配合两遍溢出吸收，滚动条不可
 能因布局后到而复现。headless 实测（无缓存）：tabmenu 仅含页签
 （52px），整页 overflow=0，footer 完整可见。
+
+## 滚动条根因：内层滚动容器（2026-09-10，用户 Console 实测数据定位）
+
+用户环境数据：documentElement overflow=0 但 footer 物理底部
+1721px > 视口 1658px——argon 主题在 #maincontent 等内层容器滚动，
+documentElement 永远报 0，两遍吸收因此失效。修复：第二遍改为
+量"内容区+footer 中最深元素物理伸出视口多少"（跳过
+absolute/fixed 悬浮元素防误收缩），与滚动容器归属无关，任何
+主题下都成立。headless 回归 overflow=0。

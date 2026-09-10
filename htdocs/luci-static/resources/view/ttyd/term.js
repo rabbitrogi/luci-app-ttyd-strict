@@ -55,10 +55,33 @@ return view.extend({
 		if (h > 240)
 			this.termHost.style.height = h + 'px';
 
-		/* second pass: absorb whatever still overflows the viewport
-		 * (theme footer below the view etc.) so the whole page fits
-		 * and no browser scrollbar appears - works in any theme */
-		var overflow = document.documentElement.scrollHeight - window.innerHeight;
+		/* second pass: absorb whatever physically extends below the
+		 * viewport. Measuring documentElement.scrollHeight is NOT
+		 * enough: themes may clip/scroll in an inner container
+		 * (argon scrolls #maincontent), making the document report
+		 * zero overflow while a real scrollbar exists. Instead, find
+		 * how far in-flow content reaches below the fold - floating
+		 * elements (tooltips, position:absolute/fixed) are skipped so
+		 * they cannot over-shrink the terminal. */
+		var maxBottom = top + h,
+		    scope = document.querySelector('#maincontent') || document.body;
+
+		scope.querySelectorAll('*').forEach(function(e) {
+			var b = e.getBoundingClientRect().bottom;
+			if (b > maxBottom) {
+				var p = getComputedStyle(e).position;
+				if (p != 'absolute' && p != 'fixed')
+					maxBottom = b;
+			}
+		});
+
+		[document.querySelector('footer'), document.body].forEach(function(e) {
+			if (!e) return;
+			var b = e.getBoundingClientRect().bottom;
+			if (b > maxBottom) maxBottom = b;
+		});
+
+		var overflow = maxBottom - window.innerHeight;
 		if (overflow > 0 && h - overflow - 2 > 240)
 			this.termHost.style.height = (h - overflow - 2) + 'px';
 	},
