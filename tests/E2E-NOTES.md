@@ -185,3 +185,12 @@ documentElement 永远报 0，两遍吸收因此失效。修复：第二遍改�
 量"内容区+footer 中最深元素物理伸出视口多少"（跳过
 absolute/fixed 悬浮元素防误收缩），与滚动容器归属无关，任何
 主题下都成立。headless 回归 overflow=0。
+
+## 窄屏（footer 被 mobile-hide 隐藏）适配（2026-09-10 上午）
+
+用户实测：argon 在窄宽度下去侧栏、置顶 logo、footer 加
+mobile-hide 隐藏，残余约 10px 溢出。一次性按溢出量收缩在响应式
+断点切换/容器 padding 下非精确 1:1。改为迭代收敛：缩→重测→
+必要时再缩（≤3 轮，带"无改善即停"与 240px 下限保险）。
+headless 回归 1280/500/400 宽全部 belowFold=0（footer 隐藏时同
+样收敛）。

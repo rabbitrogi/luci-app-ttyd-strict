@@ -48,6 +48,35 @@ return view.extend({
 
 	/* --- terminal sizing (fills the viewport below the iframe) ----- */
 
+	/* how far in-flow content (plus the footer, when the theme shows
+	 * one) physically extends below the viewport. Measuring
+	 * documentElement.scrollHeight is NOT enough: themes may scroll in
+	 * an inner container (argon scrolls #maincontent) or drop the
+	 * footer on narrow layouts (mobile-hide), so we walk the real
+	 * boxes instead. Floating elements (position:absolute/fixed,
+	 * tooltips) are skipped so they cannot over-shrink the terminal. */
+	measureBelowFold: function() {
+		var maxBottom = 0,
+		    scope = document.querySelector('#maincontent') || document.body;
+
+		var scan = function(e) {
+			var b = e.getBoundingClientRect().bottom;
+			if (b > maxBottom) {
+				var p = getComputedStyle(e).position;
+				if (p != 'absolute' && p != 'fixed')
+					maxBottom = b;
+			}
+		};
+
+		scope.querySelectorAll('*').forEach(scan);
+		scan(scope);
+		[document.querySelector('footer'), document.body].forEach(function(e) {
+			if (e) scan(e);
+		});
+
+		return maxBottom - window.innerHeight;
+	},
+
 	fitTerminal: function() {
 		var top = this.termHost.getBoundingClientRect().top,
 		    h = window.innerHeight - top - 12;
@@ -55,35 +84,27 @@ return view.extend({
 		if (h > 240)
 			this.termHost.style.height = h + 'px';
 
-		/* second pass: absorb whatever physically extends below the
-		 * viewport. Measuring documentElement.scrollHeight is NOT
-		 * enough: themes may clip/scroll in an inner container
-		 * (argon scrolls #maincontent), making the document report
-		 * zero overflow while a real scrollbar exists. Instead, find
-		 * how far in-flow content reaches below the fold - floating
-		 * elements (tooltips, position:absolute/fixed) are skipped so
-		 * they cannot over-shrink the terminal. */
-		var maxBottom = top + h,
-		    scope = document.querySelector('#maincontent') || document.body;
+		/* iteratively absorb the below-fold overflow: shrink, re-measure,
+		 * repeat. One pass is not always exact (container paddings and
+		 * responsive layout changes such as the footer being dropped on
+		 * narrow screens make the reflow non-1:1); stop when nothing
+		 * improves or the terminal would get too small. */
+		var prev = null;
 
-		scope.querySelectorAll('*').forEach(function(e) {
-			var b = e.getBoundingClientRect().bottom;
-			if (b > maxBottom) {
-				var p = getComputedStyle(e).position;
-				if (p != 'absolute' && p != 'fixed')
-					maxBottom = b;
-			}
-		});
+		for (var pass = 0; pass < 3; pass++) {
+			var overflow = this.measureBelowFold();
+			if (overflow <= 0 || (prev !== null && overflow >= prev))
+				break;
 
-		[document.querySelector('footer'), document.body].forEach(function(e) {
-			if (!e) return;
-			var b = e.getBoundingClientRect().bottom;
-			if (b > maxBottom) maxBottom = b;
-		});
+			prev = overflow;
 
-		var overflow = maxBottom - window.innerHeight;
-		if (overflow > 0 && h - overflow - 2 > 240)
-			this.termHost.style.height = (h - overflow - 2) + 'px';
+			var newH = this.termHost.getBoundingClientRect().height - overflow - 2;
+
+			if (newH <= 240)
+				break;
+
+			this.termHost.style.height = newH + 'px';
+		}
 	},
 
 	setStatus: function(text, kind) {
