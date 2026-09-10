@@ -20,10 +20,10 @@
  *     every takeover;
  *   - the listener runs with --once: typing exit closes the websocket
  *     and ttyd exits immediately (nothing to maintain). The focused
- *     page's poll notices the dead listener and silently starts a NEW
- *     one, leaving the frontend's own "Press Enter to Reconnect"
- *     prompt untouched - the user's Enter reconnects to the fresh
- *     listener. Reconnection is always user-driven, never automatic;
+ *     page's poll notices the dead session and simply re-enters the
+ *     terminal (same as clicking the Terminal menu again): fresh
+ *     listener, freshly mounted iframe. There is no "reconnect" state
+ *     to preserve - every recovery is a clean new start;
  *   - leaving the page closes the websocket, which ends the --once
  *     instance by itself; a restored listener nobody watches anymore
  *     is reaped by the plugin-side heartbeat (no page polls = stale);
@@ -226,26 +226,15 @@ return view.extend({
 			}
 
 			/* state 'none': the --once instance ended (user typed
-			 * exit, or a crash). If our iframe is already on screen
-			 * showing the frontend's reconnect prompt, start a fresh
-			 * listener but DO NOT touch the iframe - the user's Enter
-			 * reconnects to it. No iframe mounted means this page
-			 * never got a terminal: run the full entry path. */
-			if (self.mounted) {
-				var now = Date.now();
-				if (!self.pollBusy &&
-				    (!self.lastAutoStart || (now - self.lastAutoStart) / 1000 > 5)) {
-					self.lastAutoStart = now;
-					self.pollBusy = true;
-					callSessionStart().then(function(res) {
-						if (res && res.result == 'started')
-							self.ownedPid = res.pid;
-					}).catch(L.noop).finally(function() {
-						self.pollBusy = false;
-					});
-				}
-			}
-			else {
+			 * exit, or it crashed). Re-enter the terminal - exactly
+			 * what clicking the Terminal menu does again: fresh
+			 * session, freshly mounted iframe, clean new start. The
+			 * 5s throttle keeps a crash-looping instance from
+			 * spinning. */
+			var now = Date.now();
+			if (!self.pollBusy &&
+			    (!self.lastAutoStart || (now - self.lastAutoStart) / 1000 > 5)) {
+				self.lastAutoStart = now;
 				self.ensureSession();
 			}
 
