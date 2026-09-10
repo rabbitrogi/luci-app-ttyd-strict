@@ -40,7 +40,10 @@ var callSessionTakeover = rpc.declare({
 	object: 'ttyd-strict', method: 'session_takeover'
 });
 
-var RESTART_INTERVAL = 15;   /* min seconds between automatic restarts */
+var RESTART_INTERVAL = 5;    /* min seconds between automatic restarts */
+var POLL_INTERVAL = 3;       /* fast poll: after `exit` the terminal must
+                              * come back within seconds, not at the next
+                              * 10s tick */
 
 return view.extend({
 	load: function() {
@@ -234,7 +237,7 @@ return view.extend({
 					self.pollBusy = true;
 					callSessionStart().then(function(res) {
 						if (res && res.result == 'started')
-							self.mountTerminal();
+							self.mountTerminal(res.pid);
 					}).catch(L.noop).finally(function() {
 						self.pollBusy = false;
 					});
@@ -281,7 +284,7 @@ return view.extend({
 		 * makes the theme render a refresh control in the tab bar which
 		 * upstream does not have (and which appears AFTER our height
 		 * measurement, breaking the viewport fit) */
-		setInterval(this.pollStatus.bind(this), 10000);
+		setInterval(this.pollStatus.bind(this), POLL_INTERVAL * 1000);
 
 		/* ownership = focused AND visible, tracked as a sticky
 		 * event-driven state (a focus event implies focus; blur or
