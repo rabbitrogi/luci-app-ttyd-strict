@@ -2,18 +2,22 @@
 'require view';
 'require uci';
 'require rpc';
-'require ui';
 
 /*
  * luci-app-ttyd (strict fork) — terminal view.
  *
- * Fully automatic lifecycle, no manual controls:
- *   - opening the page starts the on-demand ttyd (via the ttyd-strict
- *     rpcd plugin, single client --once); a leftover session (stale tab)
- *     is reaped/taken over automatically - the syslog audit trail on
+ * Upstream renders a static iframe; this fork adds a fully automatic
+ * session lifecycle around it (no manual controls, no status UI):
+ *   - opening the page starts the on-demand ttyd via the "ttyd-strict"
+ *     rpcd plugin (single client, --once); a leftover session from a
+ *     stale tab is reaped or taken over automatically - the syslog on
  *     the device records every takeover;
- *   - leaving the page ends the session: the websocket dies with the
- *     document and a pagehide beacon stops the instance as backstop.
+ *   - leaving the page ends the session (the websocket dies with the
+ *     document; a pagehide beacon stops the instance as backstop);
+ *   - the iframe fills the viewport below it, absorbing whatever the
+ *     theme places above/below so the page never gets a scrollbar.
+ * The only extra UI is an error banner for conditions the user must
+ * resolve (port held by a non-ttyd process, RPC/plugin failure).
  */
 
 var callSessionStatus = rpc.declare({
@@ -33,10 +37,7 @@ var RESTART_INTERVAL = 15;   /* min seconds between automatic restarts */
 
 return view.extend({
 	load: function() {
-		return Promise.all([
-			uci.load('ttyd'),
-			callSessionStatus().catch(function() { return null; })
-		]).then(function(r) { return r[1]; });
+		return uci.load('ttyd');
 	},
 
 	terminalUrl: function() {
@@ -46,7 +47,7 @@ return view.extend({
 		return url || ((ssl === '1' ? 'https' : 'http') + '://' + window.location.hostname + ':' + port);
 	},
 
-	/* --- terminal sizing (fills the viewport below the iframe) ----- */
+	/* --- viewport fit ------------------------------------------------ */
 
 	/* how far in-flow content (plus the footer, when the theme shows
 	 * one) physically extends below the viewport. Measuring
@@ -83,8 +84,8 @@ return view.extend({
 		    cur = parseFloat(this.termHost.style.height) || 0;
 
 		/* ignore negligible changes: re-applying a height that differs
-		 * by a pixel or two (status text reflow) still resizes the
-		 * iframe, and ttyd echoes the xterm resize in the terminal */
+		 * by a pixel or two still resizes the iframe, and ttyd echoes
+		 * the xterm resize in the terminal */
 		if (h > 240 && Math.abs(h - cur) > 4)
 			this.termHost.style.height = h + 'px';
 
@@ -111,17 +112,7 @@ return view.extend({
 		}
 	},
 
-	setStatus: function(text, kind) {
-		this.statusEl.className = 'alert-message ' + (kind || 'info');
-		this.statusEl.textContent = text;
-		this.statusEl.style.display = text ? '' : 'none';
-		this.fitTerminal();
-	},
-
-	placeholder: function(text) {
-		this.termHost.innerHTML = '';
-		this.termHost.appendChild(E('em', {}, [ text ]));
-	},
+	/* --- session lifecycle -------------------------------------------- */
 
 	mountTerminal: function() {
 		this.termHost.innerHTML = '';
@@ -147,17 +138,10 @@ return view.extend({
 		catch (e) {}
 	},
 
-	describeStatus: function(s) {
-		var since = s.started
-			? new Date(s.started * 1000).toLocaleTimeString() : _('unknown time');
-		var clients = (s.clients || []).map(function(c) {
-			return c.ip + ':' + c.port;
-		}).join(', ') || _('none');
-		return _('pid %d, started %s, clients: %s')
-			.format(s.pid || 0, since, clients);
+	showError: function(text) {
+		this.statusEl.textContent = text;
+		this.statusEl.style.display = '';
 	},
-
-	/* --- automatic session management ------------------------------- */
 
 	/* ensure a session for THIS page: start it, or take over whatever
 	 * ttyd holds the port (a stale tab of ours in the common case; the
@@ -172,59 +156,39 @@ return view.extend({
 		this.lastAutoStart = Date.now();
 
 		return callSessionStart().then(function(res) {
-			if (res && res.result == 'started') {
+			if (res && res.result == 'started')
 				self.mountTerminal();
-				self.setStatus('', 'info');
-			}
 			else if (res && !res.result && res.state == 'ours' &&
-			    res.client_count == 0) {
+			    res.client_count == 0)
 				/* freshly started instance waiting for its client -
 				 * attach to it instead of taking it over */
 				self.mountTerminal();
-				self.setStatus('', 'info');
-			}
 			else if (res && !res.result &&
-			    (res.state == 'ours' || res.state == 'foreign-ttyd')) {
+			    (res.state == 'ours' || res.state == 'foreign-ttyd'))
 				/* live client somewhere else: take over without asking -
 				 * being on this page IS the decision */
-				self.placeholder(_('restarting session...'));
-				self.setStatus(_('Previous session (%s) is being taken over - this has been logged.')
-					.format(self.describeStatus(res)), 'info');
 				return callSessionTakeover().then(function(r2) {
-					if (r2 && r2.result == 'started') {
+					if (r2 && r2.result == 'started')
 						self.mountTerminal();
-						self.setStatus('', 'info');
-					}
-					else if (r2 && r2.state == 'foreign-other') {
-						self.showOccupiedUnknown(r2);
-					}
-					else {
-						self.placeholder(_('no active session'));
-						self.setStatus(_('Unable to start session: %s')
-							.format((r2 && r2.result) || _('unknown')), 'error');
-					}
+					else if (r2 && r2.state == 'foreign-other')
+						self.showError(_('Port %d is held by a non-ttyd process - resolve it manually, then reopen this page.')
+							.format(r2.port));
+					else
+						self.showError(_('Unable to start session: %s')
+							.format((r2 && r2.result) || _('unknown')));
 				});
-			}
-			else if (res && res.state == 'foreign-other') {
-				self.showOccupiedUnknown(res);
-			}
-			else {
-				self.placeholder(_('no active session'));
-				self.setStatus(_('Unable to start session: %s')
-					.format((res && res.result) || _('unknown')), 'error');
-			}
+			else if (res && res.state == 'foreign-other')
+				self.showError(_('Port %d is held by a non-ttyd process - resolve it manually, then reopen this page.')
+					.format(res.port));
+			else
+				self.showError(_('Unable to start session: %s')
+					.format((res && res.result) || _('unknown')));
 		}).catch(function() {
-			self.setStatus(_('RPC call failed - is the ttyd-strict rpcd plugin installed?'), 'error');
+			self.showError(_('RPC call failed - is the ttyd-strict rpcd plugin installed?'));
 		});
 	},
 
-	showOccupiedUnknown: function(s) {
-		this.placeholder(_('no active session'));
-		this.setStatus(_('Port %d is held by a non-ttyd process (%s, pid %d) - refusing to touch it. Resolve it manually, then reopen this page.')
-			.format(s.port, s.comm || _('unknown'), s.pid || 0), 'error');
-	},
-
-	/* --- background poll --------------------------------------------- */
+	/* --- background self-heal ----------------------------------------- */
 
 	pollStatus: function() {
 		var self = this;
@@ -236,7 +200,6 @@ return view.extend({
 			if (s.state == 'ours') {
 				if (s.client_count > 0) {
 					self.zeroClientSince = null;
-					self.setStatus(_('Session active (%s)').format(self.describeStatus(s)), 'info');
 				}
 				else {
 					/* session alive but nothing connected: if the iframe
@@ -248,7 +211,6 @@ return view.extend({
 						self.zeroClientSince = null;
 						self.mountTerminal();
 					}
-					self.setStatus(_('Session running, waiting for the terminal to connect...'), 'info');
 				}
 				return;
 			}
@@ -262,8 +224,6 @@ return view.extend({
 					callSessionStart().then(function(res) {
 						if (res && res.result == 'started')
 							self.mountTerminal();
-						else if (res && !res.result && res.state == 'foreign-other')
-							self.showOccupiedUnknown(res);
 					}).catch(L.noop).finally(function() {
 						self.pollBusy = false;
 					});
@@ -279,7 +239,7 @@ return view.extend({
 
 	/* --- view ---------------------------------------------------------- */
 
-	render: function(initial) {
+	render: function() {
 		var self = this;
 		var port = uci.get_first('ttyd', 'ttyd', 'port') || '7681';
 
@@ -287,15 +247,13 @@ return view.extend({
 			return E('div', { class: 'alert-message warning' },
 				_('Random ttyd port (port=0) is not supported.<br />Change to a fixed port and try again.'));
 
-		this.statusEl = E('div', { 'class': 'alert-message info', 'style': 'display:none' });
+		this.statusEl = E('div', { 'class': 'alert-message error', 'style': 'display:none' });
 		this.termHost = E('div', { 'class': 'cbi-section', 'style': 'height: 60vh' });
 
 		var view = E('div', {}, [
 			this.statusEl,
 			this.termHost
 		]);
-
-		this.placeholder(_('starting session...'));
 
 		window.addEventListener('resize', this.fitTerminal.bind(this));
 		requestAnimationFrame(this.fitTerminal.bind(this));
@@ -326,10 +284,7 @@ return view.extend({
 		 * measurement, breaking the viewport fit) */
 		setInterval(this.pollStatus.bind(this), 10000);
 
-		if (!initial)
-			this.setStatus(_('Status probe failed - is the ttyd-strict rpcd plugin installed?'), 'error');
-		else
-			this.ensureSession();
+		this.ensureSession();
 
 		return view;
 	},

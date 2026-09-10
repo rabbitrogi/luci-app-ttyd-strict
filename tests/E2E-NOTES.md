@@ -212,3 +212,13 @@ headless 回归 1280/500/400 宽全部 belowFold=0（footer 隐藏时同
    修复：fitTerminal 高度变化 ≤4px 不应用（状态栏文字回流引起
    的 1-2px 抖动不再传导到 iframe resize）；收敛循环仅在溢出
    >2px 时动作。沙盒 41/41。
+
+## 移除状态栏与占位文本（2026-09-10，用户设计评审第二轮）
+
+"Session active (pid…)" 状态栏与 "starting session…" 占位文本对普
+通用户无信息价值，且状态栏在 10 秒轮询后出现必然挤压终端高度
+（即使有 ≤4px 阈值也属多余 UI）。全部删除：term.js 仅保留错误
+横幅（非 ttyd 进程占端口 / RPC 失败等必须人工介入的场景）。
+load/render 签名回归上游形态（load 仅 uci.load）。orb feed 树顺
+带清除两处早期误 rsync 的杂散文件。headless 回归：进入即终端、
+无状态栏、belowFold=0、跨 10 秒高度 619px 纹丝不动。
