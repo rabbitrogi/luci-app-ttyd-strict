@@ -76,7 +76,7 @@ sed -e 's/kill "\$/sbed_kill "\$/g' -e 's/kill -9 "\$/sbed_kill -9 "\$/g' \
     -e "s#/lib/functions.sh#$SB/functions.sh#" \
     -e "s#/lib/functions/network.sh#$SB/network.sh#" \
     -e "s#/var/run/ttyd-strict.pid#$SB/run/pid#" \
-    -e "s#/var/run/ttyd-strict.watchdog#$SB/run/ttyd-strict.watchdog#" \
+    -e "s#/var/run/ttyd-strict.heartbeat#$SB/run/ttyd-strict.heartbeat#" \
     -e "s#/var/lock/ttyd-strict-ctl#$SB/lock/ctl#" \
     -e "s#/usr/bin/ttyd#$SB/bin/ttyd#" \
     -e "s#/proc#$SB/proc#g" \
@@ -154,7 +154,7 @@ EOF
 chmod +x "$SB/bin/start-stop-daemon"
 
 export PATH="$SB/bin:$PATH"
-export WATCHDOG_SECS=2
+export HEARTBEAT_SECS=2
 
 # ---------- world helpers ----------
 
@@ -162,8 +162,7 @@ reset_world() {
     rm -rf "$SB/proc"; mkdir -p "$SB/proc/net"
     echo "99999999.00 0.00" > "$SB/proc/uptime"    # ancient boot: instances created via make_proc count as old (grace does not apply)
     : > "$SB/proc/net/tcp"
-    [ -f "$SB/run/ttyd-strict.watchdog" ] && kill "$(cat "$SB/run/ttyd-strict.watchdog" 2>/dev/null)" 2>/dev/null
-    rm -f "$SB/run/pid" "$SB/run/ttyd-strict.watchdog"
+    rm -f "$SB/run/pid" "$SB/run/ttyd-strict.heartbeat"
     : > "$SB/logger.log"
     : > "$SB/netstat.out"
 }
@@ -313,14 +312,24 @@ grep -q "stale beacon" "$SB/logger.log" && ok "有 stale beacon 日志" || bad "
 out=$(echo '{"pid": 4242}' | sh "$SB/plugin" call session_stop)
 [ ! -d "$SB/proc/4242" ] && ok "pid 匹配 → 实例停止" || bad "实例仍在"
 
-say "== T15: 看门狗——无页面续命时收掉孤儿监听器 =="
+say "== T15: 心跳——页面在轮询则监听器保留，页面消失则回收 =="
 reset_world
-out=$(plug session_start)
-[ "$(echo "$out" | jget result)" = "started" ] && ok "会话已启动" || bad "启动失败"
-sleep 4   # WATCHDOG_SECS=2，无人续命
+# 新鲜心跳 + 无客户端 → 保留（页面还开着、正等用户回车）
+make_proc 4242 ttyd 9999
+echo 4242 > "$SB/run/pid"
+touch "$SB/run/ttyd-strict.heartbeat"
 out=$(plug session_status)
-[ "$(echo "$out" | jget state)" = "none" ] && ok "孤儿被看门狗回收（none）" || bad "state=$(echo "$out" | jget state)"
-grep -q "watchdog: reaping" "$SB/logger.log" && ok "有看门狗日志" || bad "无看门狗日志"
+[ "$(echo "$out" | jget state)" = "ours" ] && ok "新鲜心跳 → 监听器保留" || bad "state=$(echo "$out" | jget state)"
+[ -d "$SB/proc/4242" ] && ok "实例存活" || bad "实例被误杀"
+# 过期心跳 + 无客户端 → 回收（页面早已不在）
+reset_world
+make_proc 4242 ttyd 9999
+echo 4242 > "$SB/run/pid"
+touch -t 202001010000 "$SB/run/ttyd-strict.heartbeat"   # 远古心跳
+out=$(plug session_status)
+[ "$(echo "$out" | jget state)" = "none" ] && ok "过期心跳 → 孤儿回收（none）" || bad "state=$(echo "$out" | jget state)"
+[ ! -d "$SB/proc/4242" ] && ok "实例已收" || bad "实例仍在"
+grep -q "heartbeat stale" "$SB/logger.log" && ok "有心跳回收日志" || bad "无日志"
 
 say ""
 say "========== 结果: PASS=$PASS FAIL=$FAIL =========="
