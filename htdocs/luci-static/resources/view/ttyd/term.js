@@ -239,6 +239,14 @@ return view.extend({
 		window.addEventListener('resize', this.fitTerminal.bind(this));
 		requestAnimationFrame(this.fitTerminal.bind(this));
 
+		/* the framework assembles parts of the layout asynchronously
+		 * (tab bar, indicators) AFTER the view renders - recompute the
+		 * fit whenever the content area mutates so latecomer rows are
+		 * always absorbed and the page never grows a scrollbar */
+		var mo = new MutationObserver(this.fitTerminal.bind(this));
+		mo.observe(document.getElementById('maincontent') || document.body,
+			{ childList: true, subtree: true });
+
 		/* No beforeunload confirmation here on purpose: embedded
 		 * browsers (Electron webviews etc.) do not surface the unload
 		 * dialog and silently CANCEL the navigation instead - the user

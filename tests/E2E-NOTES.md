@@ -168,3 +168,11 @@ poll.add() 会让主题在页签栏渲染一个上游没有的"刷新"控件（�
 改动原则不可接受），且该控件异步出现在高度测量之后，把布局撑
 出滚动条——正是 viewport 适配仍不正确的根源。改为普通
 setInterval 轮询（10s，行为不变），控件与该行高度一并消失。
+
+## 布局异步变化的通用适配（2026-09-10）
+
+fitTerminal 增加 MutationObserver（监听 #maincontent childList/
+subtree）：框架在视图渲染之后异步拼装的任何行（页签栏、指示
+器、未来框架变化）都会触发重算，配合两遍溢出吸收，滚动条不可
+能因布局后到而复现。headless 实测（无缓存）：tabmenu 仅含页签
+（52px），整页 overflow=0，footer 完整可见。
