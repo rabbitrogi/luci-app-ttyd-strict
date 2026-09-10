@@ -2,7 +2,6 @@
 'require view';
 'require uci';
 'require rpc';
-'require poll';
 'require ui';
 
 /*
@@ -252,7 +251,11 @@ return view.extend({
 				self.stopSessionOnLeave();
 		});
 
-		poll.add(this.pollStatus.bind(this), 10);
+		/* plain interval instead of LuCI's poll framework: poll.add()
+		 * makes the theme render a refresh control in the tab bar which
+		 * upstream does not have (and which appears AFTER our height
+		 * measurement, breaking the viewport fit) */
+		setInterval(this.pollStatus.bind(this), 10000);
 
 		if (!initial)
 			this.setStatus(_('Status probe failed - is the ttyd-strict rpcd plugin installed?'), 'error');

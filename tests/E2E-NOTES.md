@@ -161,3 +161,10 @@ fitTerminal 增加第二遍"溢出吸收"：先撑满视口剩余，再量
 documentElement.scrollHeight 与 innerHeight 的差值（footer 等）
 并扣掉——整页恰好容纳，浏览器滚动条消失，footer 完整可见。
 主题无关（不量 footer 具体高度）。
+
+## 移除 LuCI poll 框架带来的"刷新"控件（2026-09-10）
+
+poll.add() 会让主题在页签栏渲染一个上游没有的"刷新"控件（最小
+改动原则不可接受），且该控件异步出现在高度测量之后，把布局撑
+出滚动条——正是 viewport 适配仍不正确的根源。改为普通
+setInterval 轮询（10s，行为不变），控件与该行高度一并消失。
