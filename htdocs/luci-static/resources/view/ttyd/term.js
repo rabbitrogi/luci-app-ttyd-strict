@@ -8,6 +8,12 @@
  *
  * Upstream renders a static iframe; this fork adds a fully automatic
  * session lifecycle around it (no manual controls, no status UI):
+ * Session ownership follows FOCUS: the one focused, visible page owns
+ * the terminal. A page that lost focus (window switch) or is hidden
+ * (background tab - throttled polls used to hijack the foreground
+ * session) stays dormant; regaining focus triggers a poll that
+ * reclaims the session if someone else took it meanwhile.
+ *
  *   - opening the page starts the on-demand ttyd via the "ttyd-strict"
  *     rpcd plugin (single client, --once); a leftover session from a
  *     stale tab is reaped or taken over automatically - the syslog on
@@ -115,7 +121,10 @@ return view.extend({
 
 	/* --- session lifecycle -------------------------------------------- */
 
-	mountTerminal: function() {
+	mountTerminal: function(ownedPid) {
+		if (typeof(ownedPid) != 'undefined')
+			this.ownedPid = ownedPid;
+		this.mounted = true;
 		this.termHost.innerHTML = '';
 		this.termHost.appendChild(E('iframe', {
 			src: this.terminalUrl(),
@@ -143,19 +152,20 @@ return view.extend({
 
 		return callSessionStart().then(function(res) {
 			if (res && res.result == 'started')
-				self.mountTerminal();
+				self.mountTerminal(res.pid);
 			else if (res && !res.result && res.state == 'ours' &&
 			    res.client_count == 0)
 				/* freshly started instance waiting for its client -
 				 * attach to it instead of taking it over */
-				self.mountTerminal();
+				self.mountTerminal(res.pid);
 			else if (res && !res.result &&
 			    (res.state == 'ours' || res.state == 'foreign-ttyd'))
 				/* live client somewhere else: take over without asking -
-				 * being on this page IS the decision */
+				 * being on this page IS the decision (visible pages
+				 * only - ensureSession is never called while hidden) */
 				return callSessionTakeover().then(function(r2) {
 					if (r2 && r2.result == 'started')
-						self.mountTerminal();
+						self.mountTerminal(r2.pid);
 					else if (r2 && r2.state == 'foreign-other')
 						self.showError(_('Port %d is held by a non-ttyd process - resolve it manually, then reopen this page.')
 							.format(r2.port));
@@ -179,6 +189,12 @@ return view.extend({
 	pollStatus: function() {
 		var self = this;
 
+		/* only the focused, visible page may act: a background tab
+		 * (hidden) or a window that lost focus stays dormant - its
+		 * throttled poll otherwise hijacks the foreground session */
+		if (!this.pageActive)
+			return Promise.resolve();
+
 		return callSessionStatus().then(function(s) {
 			if (!s || !s.state)
 				return;
@@ -186,6 +202,15 @@ return view.extend({
 			if (s.state == 'ours') {
 				if (s.client_count > 0) {
 					self.zeroClientSince = null;
+
+					/* no terminal on screen (page was loaded while
+					 * hidden) or someone else took over meanwhile:
+					 * as the now-visible page, bring it up / reclaim */
+					if (!self.mounted ||
+					    (self.ownedPid && s.pid && s.pid != self.ownedPid))
+						self.ensureSession();
+
+					return;
 				}
 				else {
 					/* session alive but nothing connected: if the iframe
@@ -226,6 +251,7 @@ return view.extend({
 	/* --- view ---------------------------------------------------------- */
 
 	render: function() {
+		var self = this;
 		var port = uci.get_first('ttyd', 'ttyd', 'port') || '7681';
 
 		if (port === '0')
@@ -257,7 +283,27 @@ return view.extend({
 		 * measurement, breaking the viewport fit) */
 		setInterval(this.pollStatus.bind(this), 10000);
 
-		this.ensureSession();
+		/* ownership = focused AND visible, tracked as a sticky
+		 * event-driven state (a focus event implies focus; blur or
+		 * hidden clears it). Both edges re-run the poll, which starts
+		 * or reclaims the session as appropriate. */
+		var syncActive = function(active) {
+			self.pageActive = active && (document.visibilityState == 'visible');
+		};
+		syncActive(document.hasFocus());
+		document.addEventListener('visibilitychange', function() {
+			syncActive(self.pageActive || document.hasFocus());
+		});
+		window.addEventListener('focus', function() {
+			syncActive(true);
+			self.pollStatus();
+		});
+		window.addEventListener('blur', function() {
+			syncActive(false);
+		});
+
+		if (this.pageActive)
+			this.ensureSession();
 
 		return view;
 	},

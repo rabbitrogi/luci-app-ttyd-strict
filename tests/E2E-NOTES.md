@@ -237,3 +237,21 @@ beacon 本属"保险带"，但 ws 断开（页面卸载与 bfcache 进入都会�
 手——连同 sessionActive 标记与 callSessionStop 声明整体移除。
 headless 5/5 连续刷新回归：每次 ours+1client+新 pid，最终会话
 无迟到 stop（日志核对 started 与 stopped 的相对位置）。
+
+## 会话所有权改为焦点模型（2026-09-10 下午）
+
+用户环境（非无痕 + 并存多页面）持续出现 Reconnect 互抢：桌面
+Chrome 与 ZCode IAB 里的终端页并存时，"可见性"模型无法区分两个
+都可见的窗口（IAB 宿主前台时其页面 visible，仍会抢桌面 Chrome
+的会话，反之亦然 → ping-pong）。终极模型：**焦点 + 可见性**，
+事件驱动的粘性状态（focus→激活并立即 poll；blur/hidden→休眠）。
+全局唯一焦点页面拥有会话；失焦/后台页面永不发起启动/接管；
+恢复焦点自动核查归属（pid 认领）并夺回。插件 started 响应携带
+pid 供归属判定；隐藏加载的页面渲染完成但保持休眠（mounted 标
+记 + poll 补启动）。
+
+headless 验证（注入 focus 事件模拟焦点）：无焦点加载不起会话 ✓；
+focus 激活 ✓；5/5 刷新循环健康 ✓。注意：headless 的 hasFocus()
+恒 false 且后台标签被冻结——真实浏览器语义需用户实测。
+另发现：term.js 缓存 URL 带 ?v=构建号（不随部署变化），快速部
+署后浏览器可能持旧 JS——部署后需硬刷新一次。

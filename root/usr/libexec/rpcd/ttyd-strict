@@ -291,6 +291,18 @@ emit_status() {
 	json_dump
 }
 
+# 'started' result, carrying the new instance pid so the page can
+# claim ownership (a hidden tab must not fight for a session it no
+# longer owns)
+emit_started() {
+	local pid
+	pid=$(our_pid)
+	json_init
+	json_add_string result "started"
+	[ -n "$pid" ] && json_add_int pid "$pid"
+	json_dump
+}
+
 # busy/occupied payload for session_start (drives the takeover dialog)
 emit_busy() {
 	emit_status
@@ -330,7 +342,7 @@ EOF
 				case "$STATE" in
 					none)
 						if start_ours; then
-							json_init; json_add_string result "started"; json_dump
+							emit_started
 						else
 							json_init; json_add_string result "start-failed"; json_dump
 							exit 1
@@ -353,7 +365,7 @@ EOF
 							kill_pid "$PID" "clientless restart"
 							wait_listener_gone
 							if start_ours; then
-								json_init; json_add_string result "started"; json_dump
+								emit_started
 							else
 								json_init; json_add_string result "start-failed"; json_dump
 								exit 1
@@ -381,7 +393,7 @@ EOF
 				case "$STATE" in
 					none)
 						if start_ours; then
-							json_init; json_add_string result "started"; json_dump
+							emit_started
 						else
 							json_init; json_add_string result "start-failed"; json_dump
 							exit 1
@@ -392,7 +404,7 @@ EOF
 						kill_pid "$PID" "user takeover"
 						wait_listener_gone
 						if start_ours; then
-							json_init; json_add_string result "started"; json_dump
+							emit_started
 						else
 							json_init; json_add_string result "start-failed"; json_dump
 							exit 1
