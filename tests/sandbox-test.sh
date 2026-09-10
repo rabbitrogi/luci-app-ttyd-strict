@@ -39,6 +39,21 @@ json_add_object() { _jsep; J_OUT="$J_OUT{"; J_NEEDSEP=0; }
 json_close_object() { J_OUT="${J_OUT%,}}"; J_NEEDSEP=1; }
 json_close_array() { J_OUT="${J_OUT%,}]"; J_NEEDSEP=1; }
 json_dump() { printf '{%s}\n' "$J_OUT"; }
+JSON_IN=""
+json_load() { JSON_IN="$1"; }
+json_get_var() {
+	local __var="$1" __key="$2" __val
+	__val=$(printf '%s' "$JSON_IN" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    v = d.get('$__key', '')
+    print('' if v is None else v)
+except Exception:
+    pass" 2>/dev/null)
+	eval "$__var=\$__val"
+	return 0
+}
 EOF
 
 # kill is a shell builtin and would never hit the fake in PATH; the
@@ -61,6 +76,7 @@ sed -e 's/kill "\$/sbed_kill "\$/g' -e 's/kill -9 "\$/sbed_kill -9 "\$/g' \
     -e "s#/lib/functions.sh#$SB/functions.sh#" \
     -e "s#/lib/functions/network.sh#$SB/network.sh#" \
     -e "s#/var/run/ttyd-strict.pid#$SB/run/pid#" \
+    -e "s#/var/run/ttyd-strict.watchdog#$SB/run/ttyd-strict.watchdog#" \
     -e "s#/var/lock/ttyd-strict-ctl#$SB/lock/ctl#" \
     -e "s#/usr/bin/ttyd#$SB/bin/ttyd#" \
     -e "s#/proc#$SB/proc#g" \
@@ -138,6 +154,7 @@ EOF
 chmod +x "$SB/bin/start-stop-daemon"
 
 export PATH="$SB/bin:$PATH"
+export WATCHDOG_SECS=2
 
 # ---------- world helpers ----------
 
@@ -145,7 +162,8 @@ reset_world() {
     rm -rf "$SB/proc"; mkdir -p "$SB/proc/net"
     echo "99999999.00 0.00" > "$SB/proc/uptime"    # ancient boot: instances created via make_proc count as old (grace does not apply)
     : > "$SB/proc/net/tcp"
-    rm -f "$SB/run/pid"
+    [ -f "$SB/run/ttyd-strict.watchdog" ] && kill "$(cat "$SB/run/ttyd-strict.watchdog" 2>/dev/null)" 2>/dev/null
+    rm -f "$SB/run/pid" "$SB/run/ttyd-strict.watchdog"
     : > "$SB/logger.log"
     : > "$SB/netstat.out"
 }
@@ -226,14 +244,14 @@ out=$(plug session_start)
 [ -d "$SB/proc/4242" ] && ok "4242 未被杀" || bad "4242 被误杀"
 grep -q "busy" "$SB/logger.log" && ok "有 busy 日志" || bad "无 busy 日志"
 
-say "== T8: start - 我们的实例 + 无客户端 → 自动清理重启 =="
+say "== T8: start - 我们的实例 + 无客户端 → 附着（-m 1 监听器等回车） =="
 reset_world
 make_proc 4242 ttyd 9999
 echo 4242 > "$SB/run/pid"
 out=$(plug session_start)
-[ "$(echo "$out" | jget result)" = "started" ] && ok "result=started" || bad "result=$(echo "$out" | jget result)"
-[ ! -d "$SB/proc/4242" ] && ok "旧实例被清理" || bad "旧实例仍在"
-grep -q "clientless" "$SB/logger.log" && ok "有 clientless 清理日志" || bad "无清理日志"
+[ "$(echo "$out" | jget state)" = "ours" ] && ok "返回 ours 状态（可附着）" || bad "state=$(echo "$out" | jget state)"
+[ "$(echo "$out" | jget result)" = "None" ] && ok "无 result（不重启）" || bad "result=$(echo "$out" | jget result)"
+[ -d "$SB/proc/4242" ] && ok "实例存活（监听器保留）" || bad "实例被误杀"
 
 say "== T8b: start - 外来 ttyd + 无客户端 → 同样自动清理 =="
 reset_world
@@ -285,15 +303,24 @@ out=$(plug session_status)
 [ "$(echo "$out" | jget state)" = "none" ] && ok "state=none" || bad "state=$(echo "$out" | jget state)"
 grep -q "orphan" "$SB/logger.log" && ok "有孤儿回收日志" || bad "无孤儿日志"
 
-say "== T13: 宽限——刚出生的无客户端实例不被回收 =="
+say "== T14: session_stop 的 pid 认领（陈旧 beacon 不误杀） =="
 reset_world
-echo "0.00 0.00" > "$SB/proc/uptime"    # boot == now → instance is fresh
-make_proc 4242 ttyd 9999
+make_proc 4242 ttyd 9999 192.168.1.100:54321
+echo 4242 > "$SB/run/pid"
+out=$(echo '{"pid": 999999}' | sh "$SB/plugin" call session_stop)
+[ -d "$SB/proc/4242" ] && ok "pid 不符 → 实例存活" || bad "被陈旧 stop 误杀"
+grep -q "stale beacon" "$SB/logger.log" && ok "有 stale beacon 日志" || bad "无日志"
+out=$(echo '{"pid": 4242}' | sh "$SB/plugin" call session_stop)
+[ ! -d "$SB/proc/4242" ] && ok "pid 匹配 → 实例停止" || bad "实例仍在"
+
+say "== T15: 看门狗——无页面续命时收掉孤儿监听器 =="
+reset_world
 out=$(plug session_start)
-[ "$(echo "$out" | jget state)" = "foreign-ttyd" ] && ok "返回状态载荷（未回收）" || bad "state=$(echo "$out" | jget state)"
-[ "$(echo "$out" | jget result)" = "None" ] && ok "无 result（未重启）" || bad "result=$(echo "$out" | jget result)"
-[ -d "$SB/proc/4242" ] && ok "实例存活" || bad "实例被误杀"
-grep -q "grace" "$SB/logger.log" && ok "有宽限日志" || bad "无宽限日志"
+[ "$(echo "$out" | jget result)" = "started" ] && ok "会话已启动" || bad "启动失败"
+sleep 4   # WATCHDOG_SECS=2，无人续命
+out=$(plug session_status)
+[ "$(echo "$out" | jget state)" = "none" ] && ok "孤儿被看门狗回收（none）" || bad "state=$(echo "$out" | jget state)"
+grep -q "watchdog: reaping" "$SB/logger.log" && ok "有看门狗日志" || bad "无看门狗日志"
 
 say ""
 say "========== 结果: PASS=$PASS FAIL=$FAIL =========="

@@ -31,6 +31,10 @@ PIDFILE="/var/run/ttyd-strict.pid"
 LOCKDIR="/var/lock/ttyd-strict-ctl"
 TTYD_BIN="/usr/bin/ttyd"
 CONF="ttyd"
+# orphan sweeper: with -m 1 the listener outlives its client; while a
+# page is open its polls re-arm this watchdog, so it only fires when
+# the owning page is gone (browser crash, lost beacon)
+WATCHDOG_SECS="${WATCHDOG_SECS:-600}"
 
 # probe results (globals)
 STATE=""           # none | ours | foreign-ttyd | foreign-other
@@ -42,6 +46,40 @@ CLIENT_COUNT=0
 
 log() {
 	logger -t "$TAG" -p daemon.notice "$@"
+}
+
+WATCHDOG_FILE="/var/run/ttyd-strict.watchdog"
+
+# (re)arm the orphan sweeper for instance $1; called from probe while
+# our instance exists, so live pages keep it fed and dead pages let it
+# fire. `env kill` bypasses the shell builtin so tests can fake it.
+arm_watchdog() {
+	local pid="$1" wdpid
+	[ -n "$pid" ] || return 0
+	if [ -f "$WATCHDOG_FILE" ]; then
+		wdpid=$(cat "$WATCHDOG_FILE" 2>/dev/null)
+		[ -n "$wdpid" ] && kill "$wdpid" 2>/dev/null
+	fi
+	nohup sh -c '
+		port="$1"; pid="$2"; secs="$3"
+		sleep "$secs"
+		[ "$(cat /var/run/ttyd-strict.pid 2>/dev/null)" = "$pid" ] || exit 0
+		n=$(netstat -tn 2>/dev/null | grep ":$port\$" | grep -c ESTABLISHED)
+		[ "$n" -eq 0 ] || exit 0
+		logger -t ttyd-strict -p daemon.notice "watchdog: reaping orphan clientless ttyd pid=$pid (no page re-armed it)"
+		env kill "$pid" 2>/dev/null
+	' x "$PORT" "$pid" "$WATCHDOG_SECS" >/dev/null 2>&1 &
+	echo $! > "$WATCHDOG_FILE"
+}
+
+stop_watchdog() {
+	local wdpid
+	if [ -f "$WATCHDOG_FILE" ]; then
+		wdpid=$(cat "$WATCHDOG_FILE" 2>/dev/null)
+		[ -n "$wdpid" ] && kill "$wdpid" 2>/dev/null
+		rm -f "$WATCHDOG_FILE"
+	fi
+	return 0
 }
 
 # read the FIRST ttyd instance from the shared upstream uci config
@@ -165,6 +203,7 @@ probe() {
 	}
 
 	[ -n "$PID" ] && [ "$STATE" != "foreign-other" ] && STARTED=$(proc_start_epoch "$PID")
+	[ "$STATE" = "ours" ] && arm_watchdog "$PID"
 	return 0
 }
 
@@ -215,7 +254,7 @@ start_ours() {
 		# port in TIME_WAIT limbo - wait it out before binding again
 		wait_listener_gone
 		start-stop-daemon -S -b -m -p "$PIDFILE" -x "$TTYD_BIN" -- \
-			-p "$PORT" ${dev:+-i "$dev"} -o ${WFLAG:+$WFLAG} ${CREDENTIAL:+-c "$CREDENTIAL"} $COMMAND \
+			-p "$PORT" ${dev:+-i "$dev"} -m 1 ${WFLAG:+$WFLAG} ${CREDENTIAL:+-c "$CREDENTIAL"} $COMMAND \
 			|| { log "start-stop-daemon failed"; return 1; }
 
 		# wait until our instance owns the listener (ttyd binds async)
@@ -226,6 +265,7 @@ start_ours() {
 			[ -n "$pid" ] && [ -n "$inode" ] && \
 				[ "$(pid_of_inode "$inode")" = "$pid" ] && {
 					log "session started: pid=$pid port=$PORT iface=$dev command=[$COMMAND]"
+					arm_watchdog "$pid"
 					return 0
 				}
 		done
@@ -348,21 +388,23 @@ EOF
 							exit 1
 						fi
 					;;
-					ours|foreign-ttyd)
+					ours)
 						if [ "$CLIENT_COUNT" -eq 0 ]; then
-							# grace: an instance started moments ago may simply
-							# not have its client websocket yet (the page iframe
-							# is still loading) - reaping it here leaves the
-							# browser on a dead "reconnect" screen
-							if [ -n "$STARTED" ] && [ $(( $(date +%s) - STARTED )) -lt 5 ]; then
-								log "fresh instance pid=$PID has no client yet, waiting (grace)"
-								emit_status
-								release_lock
-								exit 0
-							fi
-							# nobody connected (stale page refresh): reap, restart
-							log "reaping clientless ttyd pid=$PID (state=$STATE), restarting"
-							kill_pid "$PID" "clientless restart"
+							# -m 1 listener alive with no client: the user typed
+							# exit (or the iframe is still loading) - the frontend
+							# shows its reconnect prompt and Enter reconnects.
+							# Report it as attachable; never restart on our own.
+							emit_status
+						else
+							log_busy
+							emit_busy
+						fi
+					;;
+					foreign-ttyd)
+						if [ "$CLIENT_COUNT" -eq 0 ]; then
+							# idle listener we do not own: reclaim the port
+							log "reaping idle foreign ttyd pid=$PID, starting ours"
+							kill_pid "$PID" "foreign idle reclaim"
 							wait_listener_gone
 							if start_ours; then
 								emit_started
@@ -422,11 +464,26 @@ EOF
 					json_init; json_add_string result "lock-timeout"; json_dump
 					exit 1
 				}
+				# optional pid scoping from the request body: a pagehide
+				# beacon carries the pid of the instance ITS page owned;
+				# a stale beacon must never kill a newer session
+				wantpid=""
+				input=$(cat 2>/dev/null)
+				if [ -n "$input" ]; then
+					json_init
+					json_load "$input" 2>/dev/null
+					json_get_var wantpid pid 2>/dev/null || wantpid=""
+				fi
 				probe
 				if [ "$STATE" = "ours" ]; then
-					log "session stopped by request: pid=$PID"
-					kill_pid "$PID" "session_stop"
-					wait_listener_gone
+					if [ -n "$wantpid" ] && [ "$wantpid" != "$PID" ]; then
+						log "session_stop for pid=$wantpid skipped (current is $PID) - stale beacon"
+					else
+						log "session stopped by request: pid=$PID"
+						stop_watchdog
+						kill_pid "$PID" "session_stop"
+						wait_listener_gone
+					fi
 				elif [ "$STATE" != "none" ]; then
 					log "session_stop: port $PORT held by $STATE (pid=${PID:-unknown}), not touching"
 				fi
