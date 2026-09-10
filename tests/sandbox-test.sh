@@ -143,7 +143,7 @@ export PATH="$SB/bin:$PATH"
 
 reset_world() {
     rm -rf "$SB/proc"; mkdir -p "$SB/proc/net"
-    echo "0.00 0.00" > "$SB/proc/uptime"    # boot == now
+    echo "99999999.00 0.00" > "$SB/proc/uptime"    # ancient boot: instances created via make_proc count as old (grace does not apply)
     : > "$SB/proc/net/tcp"
     rm -f "$SB/run/pid"
     : > "$SB/logger.log"
@@ -284,6 +284,16 @@ awk '$4 != "0A"' "$SB/proc/net/tcp" > "$SB/proc/x" && mv "$SB/proc/x" "$SB/proc/
 out=$(plug session_status)
 [ "$(echo "$out" | jget state)" = "none" ] && ok "state=none" || bad "state=$(echo "$out" | jget state)"
 grep -q "orphan" "$SB/logger.log" && ok "有孤儿回收日志" || bad "无孤儿日志"
+
+say "== T13: 宽限——刚出生的无客户端实例不被回收 =="
+reset_world
+echo "0.00 0.00" > "$SB/proc/uptime"    # boot == now → instance is fresh
+make_proc 4242 ttyd 9999
+out=$(plug session_start)
+[ "$(echo "$out" | jget state)" = "foreign-ttyd" ] && ok "返回状态载荷（未回收）" || bad "state=$(echo "$out" | jget state)"
+[ "$(echo "$out" | jget result)" = "None" ] && ok "无 result（未重启）" || bad "result=$(echo "$out" | jget result)"
+[ -d "$SB/proc/4242" ] && ok "实例存活" || bad "实例被误杀"
+grep -q "grace" "$SB/logger.log" && ok "有宽限日志" || bad "无宽限日志"
 
 say ""
 say "========== 结果: PASS=$PASS FAIL=$FAIL =========="

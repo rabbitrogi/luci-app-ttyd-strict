@@ -338,6 +338,16 @@ EOF
 					;;
 					ours|foreign-ttyd)
 						if [ "$CLIENT_COUNT" -eq 0 ]; then
+							# grace: an instance started moments ago may simply
+							# not have its client websocket yet (the page iframe
+							# is still loading) - reaping it here leaves the
+							# browser on a dead "reconnect" screen
+							if [ -n "$STARTED" ] && [ $(( $(date +%s) - STARTED )) -lt 5 ]; then
+								log "fresh instance pid=$PID has no client yet, waiting (grace)"
+								emit_status
+								release_lock
+								exit 0
+							fi
 							# nobody connected (stale page refresh): reap, restart
 							log "reaping clientless ttyd pid=$PID (state=$STATE), restarting"
 							kill_pid "$PID" "clientless restart"

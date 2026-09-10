@@ -79,9 +79,13 @@ return view.extend({
 
 	fitTerminal: function() {
 		var top = this.termHost.getBoundingClientRect().top,
-		    h = window.innerHeight - top - 12;
+		    h = window.innerHeight - top - 12,
+		    cur = parseFloat(this.termHost.style.height) || 0;
 
-		if (h > 240)
+		/* ignore negligible changes: re-applying a height that differs
+		 * by a pixel or two (status text reflow) still resizes the
+		 * iframe, and ttyd echoes the xterm resize in the terminal */
+		if (h > 240 && Math.abs(h - cur) > 4)
 			this.termHost.style.height = h + 'px';
 
 		/* iteratively absorb the below-fold overflow: shrink, re-measure,
@@ -93,7 +97,7 @@ return view.extend({
 
 		for (var pass = 0; pass < 3; pass++) {
 			var overflow = this.measureBelowFold();
-			if (overflow <= 0 || (prev !== null && overflow >= prev))
+			if (overflow <= 2 || (prev !== null && overflow >= prev))
 				break;
 
 			prev = overflow;
@@ -161,8 +165,21 @@ return view.extend({
 	ensureSession: function() {
 		var self = this;
 
+		/* record our intent: keeps the poll's auto-restart from firing
+		 * a second session_start in parallel (the double-start race
+		 * that used to kill a freshly started instance before its
+		 * iframe connected, leaving a dead "reconnect" screen) */
+		this.lastAutoStart = Date.now();
+
 		return callSessionStart().then(function(res) {
 			if (res && res.result == 'started') {
+				self.mountTerminal();
+				self.setStatus('', 'info');
+			}
+			else if (res && !res.result && res.state == 'ours' &&
+			    res.client_count == 0) {
+				/* freshly started instance waiting for its client -
+				 * attach to it instead of taking it over */
 				self.mountTerminal();
 				self.setStatus('', 'info');
 			}

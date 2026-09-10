@@ -194,3 +194,21 @@ mobile-hide 隐藏，残余约 10px 溢出。一次性按溢出量收缩在响�
 必要时再缩（≤3 轮，带"无改善即停"与 240px 下限保险）。
 headless 回归 1280/500/400 宽全部 belowFold=0（footer 隐藏时同
 样收敛）。
+
+## 双启动竞态与高度微调（2026-09-10 上午）
+
+用户实测两问题：
+1. 进终端页约 1/10 概率显示 "Press 回车 Reconnect"（ws 已断但
+   HTTP keep-alive ESTABLISHED）。机制：ensureSession 的接管耗时
+   2-4s，期间 10s 轮询见瞬态 none 也发起 session_start 并在锁上
+   排队；接管刚起的新实例尚未等到 iframe 连接（client_count=0）
+   即被排队请求当残留回收重起，iframe 的 ws 随之中断。修复三层：
+   - 插件：无客户端且实例年龄 <5s → 宽限返回状态不回收（顶层
+     exit，误用 return 曾致穿透双输出——沙盒 T13 抓出）
+   - 前端：ours+0 客户端 → 视为"正在上线"直接挂载而非接管
+   - 前端：ensureSession 统一登记 lastAutoStart，轮询 15s 内不
+     再自动发起第二次 start
+2. 进页约 10s 高度被微调，xterm 在终端回显尺寸（如 129x92）。
+   修复：fitTerminal 高度变化 ≤4px 不应用（状态栏文字回流引起
+   的 1-2px 抖动不再传导到 iframe resize）；收敛循环仅在溢出
+   >2px 时动作。沙盒 41/41。
