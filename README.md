@@ -1,78 +1,86 @@
-# luci-app-ttyd-strict
+# luci-app-ttyd（strict fork）
 
-Strict single-session, on-demand ttyd terminal for LuCI — a hardening
-fork of the stock `luci-app-ttyd` (design rationale:
-[`../upstream-issue-luci-app-ttyd.md`](../upstream-issue-luci-app-ttyd.md),
-proposal 1).
+Stock `luci-app-ttyd` 的安全加固版：外观与交互与上游一致
+（零学习成本），会话生命周期与"正在看着终端页面的那个标签"
+绑定。设计思路、决策记录与踩坑清单见
+[`DESIGN.md`](DESIGN.md)；上游提案 openwrt/luci#9014。
 
-## Model
+## 行为总览
 
-- ttyd exists **only while the LuCI terminal page is open**. The page
-  starts it via rpcd on load; ttyd runs with `-o` (`--once`): exactly
-  **one** websocket client is accepted, everyone else is refused, and
-  the process exits by itself when that client disconnects (page close
-  or refresh tears the session down).
-- Before starting, the port is probed (listener inode → owning pid via
-  `/proc/*/fd`, live clients via `netstat`):
-  - port free → start;
-  - ttyd running with **no client** (stale refresh) → reaped and
-    restarted automatically, logged;
-  - ttyd running **with a client** → never killed silently. The LuCI
-    page shows a modal with pid / uptime / client endpoints (also
-    written to the system log) and the user decides whether to take
-    the session over (`session_takeover`);
-  - port held by a **non-ttyd** process → reported, never touched.
-- Orphan pidfiles (ttyd `--once` exited) are reaped on the next probe.
-- All decisions go to `logger`, tag `ttyd-strict` (`logread | grep
-  ttyd-strict`).
+| 场景 | 行为 |
+|---|---|
+| 进入/聚焦终端页 | 自动启动会话（被旧标签占用则自动接管，日志留痕） |
+| 失焦/切后台标签 | 页面休眠——永不发起启动/接管（焦点唯一原则） |
+| 切回/重新聚焦 | 凭 pid 认领：会话仍归我→不动；被偷→自动夺回 |
+| 离开页面（点菜单/关标签/刷新） | 监听器立即停止（pid 认领 beacon；丢失时心跳 60s 兜底） |
+| 终端内 `exit` | 监听器同 pid 存活，终端显示 "Press ⏎ to Reconnect" **静置等待** |
+| 用户敲回车 | 重连成功，新 shell（与上游完全一致；永不自动重连） |
+| 端口被非 ttyd 进程占用 | 只报告不动手（错误横幅提示人工处理） |
 
-## Layout
+所有决策写入 syslog（`logread | grep ttyd-strict`）。
 
-| path | role |
-| --- | --- |
-| `root/usr/libexec/rpcd/ttyd-strict` | rpcd plugin: probe / start / takeover / stop |
-| `htdocs/.../view/ttyd-strict/term.js` | LuCI view: auto-start, busy modal, status poll |
-| `root/usr/share/rpcd/acl.d/ttyd-strict.json` | ACL grants |
-| `root/etc/config/ttyd-strict` | uci: interface / port / credential / command |
-| `root/etc/uci-defaults/40_ttyd-strict` | first boot: default config, disable stock ttyd service |
-| `tests/sandbox-test.sh` | host-side branch tests for the plugin (no device needed) |
+## 与上游的差异（最小 diff）
 
-## Config
+对照上游（verbatim import 提交 eafb063）仅 5 处：
+
+| 文件 | 性质 |
+|---|---|
+| `htdocs/.../view/ttyd/term.js` | 重写：会话生命周期 + 视口自适应 |
+| `root/usr/libexec/rpcd/ttyd-strict` | 新增：rpcd 插件（probe/start/takeover/stop + 心跳孤儿回收） |
+| `root/usr/share/rpcd/acl.d/ttyd-strict.json` | 新增：ubus/uci 授权 |
+| `root/etc/uci-defaults/40_ttyd-strict` | 新增：禁用持久服务 + `enable=0`（对 procd reload trigger 免疫） |
+| `Makefile` | 一词：`+jshn` 依赖 |
+
+`config.js`（Config 配置页）、`menu.json`、`po/` **原样未动**——
+interface/port/credential/command 等都在上游配置页修改。
+
+## 配置
+
+复用上游 `/etc/config/ttyd`（第一个实例）：
 
 ```
-uci set ttyd-strict.strict.command='/bin/login -f root'   # passwordless
-uci set ttyd-strict.strict.interface='lan'                # bind device
-uci set ttyd-strict.strict.port='7681'
-uci commit ttyd-strict
+uci set ttyd.@ttyd[0].command='/bin/login -f root'   # 免密 root
+uci set ttyd.@ttyd[0].interface='eth1'               # 留空 = 0.0.0.0 全接口
+uci commit ttyd
 ```
 
-Passwordless login is defensible here *only* because the session is
-gated by LuCI auth plus the single-client guarantee — the whole point
-of this fork.
+- 免密 root 的安全性依赖：LuCI 登录门禁 + 单客户端排他 +
+  页面生命周期绑定（本 fork 的全部意义）。
+- `interface` 必须是**你访问 LuCI 所经的接口**（或留空绑全部，
+  ZeroTier 场景推荐留空）。
 
-## Notes / limitations
+## 集成（构建树）
 
-- The stock persistent ttyd service is disabled on install (its uci
-  config is left intact for rollback). The stock luci-app-ttyd page,
-  if still installed, will simply find the port occupied by our
-  on-demand instance.
-- **Bind the interface you actually browse LuCI through.** `interface
-  'lan'` resolves via netifd to e.g. `br-lan`/`eth0` — if you open
-  LuCI via a different address (WAN-side mgmt IP, another NIC), the
-  iframe points at that address while ttyd listens elsewhere and you
-  get a dead terminal. Set `uci ttyd-strict.strict.interface` to the
-  interface/device of your access path, a raw IP, or `0.0.0.0`.
-- ttyd's `--once` does not reject the second websocket at the TCP
-  layer: an intruder completing the handshake gets a black screen (no
-  pty, no shell) and is dropped seconds later. Security-wise the slot
-  is exclusive in practice, but `session_status.client_count` may
-  briefly read 2 during that window (verified on-device).
-- If a Wi-Fi hiccup drops the websocket, `--once` ends the session;
-  the page's status poll auto-starts a fresh one (≥15 s apart). A
-  browser tab frozen in the background (headless, OS suspending tabs)
-  drops the websocket the same way — foreground use is unaffected.
-- Run `bash tests/sandbox-test.sh` after touching the plugin — it
-  covers all probe/start/takeover/stop branches against a simulated
-  /proc + netstat world. On-device E2E results (OpenWrt 25.12.5):
-  auto-start, refresh-restart, busy dialog, takeover and slot
-  exclusion all verified; see the repo commit history notes.
+```sh
+cd <openwrt-tree>
+git -C feeds/luci checkout -- applications/luci-app-ttyd   # 还原上游
+git -C feeds/luci clean -fdq applications/luci-app-ttyd
+rsync -a <本仓库>/htdocs/.../term.js  feeds/luci/applications/luci-app-ttyd/htdocs/.../
+rsync -a <本仓库>/root/...           feeds/luci/applications/luci-app-ttyd/root/...
+sed -i 's/^LUCI_DEPENDS:=+luci-base +ttyd$/& +jshn/' feeds/luci/applications/luci-app-ttyd/Makefile
+make package/luci-app-ttyd/compile
+```
+
+customize-openwrt.sh 第 4 步已固化此流程（克隆本仓库自动施补丁）。
+**装后必验**（构建会压缩 JS，marker 不能带空格）：
+
+```sh
+grep -c "ownedPid=res.pid" /www/luci-static/resources/view/ttyd/term.js  # 应为 1
+grep -c disableReconnect  /usr/libexec/rpcd/ttyd-strict                  # 应 ≥1
+```
+
+## 测试
+
+```sh
+bash tests/sandbox-test.sh   # 插件全分支 45 断言（伪造 /proc/netstat，无需设备）
+```
+
+改动插件或 term.js 后必跑；真机 E2E 记录见
+[`tests/E2E-NOTES.md`](tests/E2E-NOTES.md)。
+
+## 已知边界
+
+- 等待回车期间监听器在监听（`-m 1` 语义）：等待窗口内"第一个
+  连上的人"拿到唯一名额；页面关闭即关闭入口。详见 DESIGN.md §6。
+- 24.10 树理论兼容（jshn 依赖已核实）但未上机验证。
+- 部署新版本后，**已打开的页面仍运行旧内存 JS**——需刷新一次。
