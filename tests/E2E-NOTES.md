@@ -1,5 +1,11 @@
 # E2E 真机验证结果（OpenWrt 25.12.5 @ 10.2.49.100, 2026-09-09）
 
+> 原始时间线记录，保留失败细节供溯源。结论性设计决策与踩坑清单见
+> [DESIGN.md](../DESIGN.md)；使用与集成见 [README.md](../README.md)。
+> 快速定位：泄漏/服务复活→`reload trigger`；重连三轮迭代→
+> `disableReconnect`/`关闭码`；布局→`belowFold`/`mobile-hide`；
+> 竞态族→`竞态`/`ping-pong`。
+
 部署方式：scp+tar 落盘安装（无 opkg 镜像），rpcd 重启加载插件，
 stock ttyd 服务自动停用。浏览器：headless Chrome 152 + CDP（LuCI
 sysauth cookie 注入绕过 IAB 表单限制）。
